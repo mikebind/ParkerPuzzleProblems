@@ -1,10 +1,12 @@
 # For exploring Parker Alternative Puzzles
-import typing
+# import typing
 from typing import Tuple, Optional, List, Dict, NamedTuple
 import numpy as np
 from enum import Enum
-from collections import namedtuple
-from bidict import bidict
+
+# from collections import namedtuple
+
+# from bidict import bidict
 
 
 # MARK: EdgePairSet
@@ -61,14 +63,6 @@ class EdgePairSet:
         return tuple(self._lookup.keys())
 
 
-class EdgePairError(Exception):
-    pass
-
-
-class LoosePiecesInFragmentError(Exception):
-    pass
-
-
 class PieceType(Enum):
     CORNER = 2
     EDGE = 1
@@ -88,24 +82,6 @@ class FragmentCoordinate(NamedTuple):
     rotationCount: int
 
 
-# MARK: PieceEdge
-# TODO: Consider eliminating, I think EdgePairList and edgeToPieceDict
-# pretty much do what I want this class to enable, and I think this
-# just needlessly complicates things
-class PieceEdge:
-    def __init__(
-        self,
-        edgeInt: int,
-        parent: "PuzzlePiece",
-        oldPartner: "PieceEdge",
-        newPartner: Optional["PieceEdge"],
-    ):
-        self.parent = parent
-        self.oldPartner = oldPartner
-        self.newPartner = newPartner
-        self.edgeNum = edgeInt
-
-
 # MARK: PuzzlePiece
 class PuzzlePiece:
     def __init__(
@@ -116,30 +92,26 @@ class PuzzlePiece:
     ):
         self.origPosition = (origRow, origCol)
         self.pieceType = self.getPieceType()
-        self.edges = (
-            PieceEdge(edgeNum, self, -edgeNum, newPartner=None)
-            for edgeNum in signedEdgeNums
-        )
+        self._signedEdgeNums = signedEdgeNums
 
     def getEdgeNums(self):
-        return tuple(edge.edgeNum for edge in self.edges)
+        return self._signedEdgeNums  # tuple(edge.edgeNum for edge in self.edges)
 
     def getPieceType(self) -> PieceType:
         """Determine piece type by kind and location of straight edges."""
-        edges = self.edges
-        if len(edges) != 4:
-            raise Exception(
-                f"Pieces are expected to have exactly 4 edges, but this one has {len(edges)} edges!"
+        edgeNums = self.getEdgeNums()
+        if len(edgeNums) != 4:
+            raise WrongEdgeCountError(
+                f"Pieces are expected to have exactly 4 edges, but this one has {len(edgeNums)} edges!"
             )
-        edgeNums = [edge.edgeNum for edge in self.edges]
         numStraightEdges = np.sum(np.array(edgeNums) == 0)
         if numStraightEdges == 2:
             # The straight edges must be adjacent
             if (edgeNums[0] == 0 and edgeNums[2] == 0) or (
                 edgeNums[1] == 0 and edgeNums[3] == 0
             ):
-                raise Exception(
-                    f"Invalid piece with straight edges on non-adjacent sides."
+                raise InvalidPieceError(
+                    "Invalid piece with straight edges on non-adjacent sides."
                 )
             pieceType = PieceType.CORNER
         elif numStraightEdges == 1:
@@ -147,12 +119,16 @@ class PuzzlePiece:
         elif numStraightEdges == 0:
             pieceType = PieceType.INTERIOR
         else:
-            raise Exception(f"Unknown piece type with {numStraightEdges} edges.")
+            raise UnknownPieceTypeError(
+                f"Unknown piece type with {numStraightEdges} edges."
+            )
         return pieceType
 
     def getCWEdges(self, startIdx) -> Tuple[Tuple[int], Tuple[int]]:
         """Get the clockwise sequence of edges, starting from startIdx"""
-        cwEdges = (*self.edges[startIdx:], *self.edges[0:startIdx])
+        startIdx = startIdx % 4  # only 0-3 are valid
+        edgeNums = self.getEdgeNums()
+        cwEdges = (*edgeNums[startIdx:], *edgeNums[0:startIdx])
         return cwEdges
 
     def __repr__(self) -> str:
@@ -195,11 +171,13 @@ class PuzzleFragment:
         self.edgePairs = edgePairs
         if fragmentCoordDict is None:
             self.fragmentCoordDict = dict()
-            self.fragmentCoordDict = self.assignFragmentCoordinates()
+            self.assignFragmentCoordinates()
         else:
             # TODO: Validate this is OK first?
             self.fragmentCoordDict = fragmentCoordDict
-        self._cachedFreeEdgesList = self.updateCachedFreeEdgesList()
+        self._cachedFreeEdgesList = _cachedFreeEdgesList
+        if self._cachedFreeEdgesList is None:
+            self.updateCachedFreeEdgesList()
 
     def assignFragmentCoordinates(self):
         """Each piece within the fragment needs to be assigned local
@@ -209,24 +187,23 @@ class PuzzleFragment:
         startingPiece = self.pieceList[0]
         self.fragmentCoordDict[startingPiece] = (0, 0, 0)
         piecesToCheckNext = set([startingPiece])
-        N, E, S, W = ((-1, 0), (0, 1), (1, 0), (0, -1))
-        offsets = (N, E, S, W)
+        # N, E, S, W = ((-1, 0), (0, 1), (1, 0), (0, -1))
+        # offsets = (N, E, S, W)
         while len(piecesToCheckNext) > 0:
             piecesToCheckNow = piecesToCheckNext
             piecesToCheckNext = set()
             for piece in piecesToCheckNow:
                 # check each edge and assign coords
-                for edge in piece.edges:
+                for edgeNum in piece.getEdgeNums():
                     # if edgeNum has a partner, assign the corresponding
                     # fragment coordinate to that piece associated with
                     # partner
-                    edgeNum = edge.edgeNum
                     partnerEdgeNum = self.edgePairs[edgeNum]
                     if partnerEdgeNum:
                         # partner edge exists, get piece
-                        partnerPiece = self.parentPuzzleParamObj.getPieceFromEdgeNum(
+                        partnerPiece = self.parentPuzzleParamObj.pieceFromEdgeDict[
                             partnerEdgeNum
-                        )
+                        ]
                         # Calculate fragment coordinate
                         partnerCoord = self.calcFragmentCoord(
                             piece,
@@ -252,7 +229,7 @@ class PuzzleFragment:
                                 )
                         except KeyError:
                             # No current fragment coordinate, assign it
-                            self.fragmentCoordDict[partnerPiece]
+                            self.fragmentCoordDict[partnerPiece] = partnerCoord
                             # Add piece to the set of pieces to check the edges of next
                             piecesToCheckNext.add(partnerPiece)
                 # Finished looping over current list of pieces to check
@@ -337,7 +314,9 @@ class PuzzleFragment:
         )
         self._cachedFreeEdgesList = freeEdges
 
-    def findFirstFreeEdge(self) -> Tuple[int, PuzzlePiece, int]:
+    def findFirstFreeEdge(
+        self, startingPiece: Optional[PuzzlePiece] = None, searchDirection: int = 0
+    ) -> Tuple[int, PuzzlePiece, int]:
         """Starting from north on the first piece in the pieceList,
         find the first edge which does not have a connected piece.
         If all edges are connected, then move to the next piece to the
@@ -346,13 +325,42 @@ class PuzzleFragment:
         was found on, and the direction it was on that piece (in the
         local fragment coordinate system).
         """
-        curPiece = self.pieceList[0]
-        localRot = self.fragmentCoordDict[curPiece].rotationCount
-        edgeNums = curPiece.getCWEdges(localRot)
+        # Default to first piece on list
+        if startingPiece is None:
+            startingPiece = self.pieceList[0]
+        # We will use the piece from edge dict and list of free edges repeatedly
+        pieceFromEdgeDict = self.parentPuzzleParamObj.pieceFromEdgeDict
         freeEdges = self.getFreeEdgesList()
-        for edgeNum in edgeNums:
-            self.checkEdgeFree(edgeNum)
-        pass
+        # Initialize before loop starts
+        curPiece = startingPiece
+        numPiecesChecked = 0
+        while numPiecesChecked <= len(self.pieceList):
+            # Get the local rotation of the current piece (in fragment coord system)
+            localRot = self.fragmentCoordDict[curPiece].rotationCount
+            # Then the edge numbers clockwise starting from the search direction
+            edgeNums = curPiece.getCWEdges((localRot + searchDirection) % 4)
+            # Check each edge, stop at the first free one
+            for rotFromSearch, edgeNum in enumerate(edgeNums):
+                if edgeNum in freeEdges:
+                    firstFreeEdgeNum = edgeNum
+                    firstFreeEdgePiece = curPiece
+                    mostRecentEdgeDirection = searchDirection + rotFromSearch
+                    # Return whenever the first free edge is found
+                    return firstFreeEdgeNum, firstFreeEdgePiece, mostRecentEdgeDirection
+            # No free edges found on this piece, find connected piece in the search direction
+            edgeNumInSearchDirection = edgeNums[0]
+            pieceInSearchDirection = pieceFromEdgeDict[
+                self.edgePairs[edgeNumInSearchDirection]
+            ]
+            # Keep the search direction, update the current piece
+            curPiece = pieceInSearchDirection
+            numPiecesChecked += 1
+        # This process should always eventually terminate for sane inputs, and never
+        # reach this line, but to avoid a bug or bad input causing an infinite loop,
+        # we leave the loop if we have checked more pieces than there are in this fragment
+        raise FirstFreeEdgeError(
+            "No free edges found!! This should be impossible, check edgePairs for problems?"
+        )
 
     def checkEdgeFree(self, edgeNum):
         freeEdges = self.getFreeEdgesList()
@@ -366,26 +374,27 @@ class PuzzleFragment:
         do the extra check to make sure all edges are either in the list of
         ordered external edges, or in the edgePairs.  (True for now,
         may change to false later to speed computation after some testing)
+
+        Search strategy: Once the first free edge is found, store it in the externalEdgeList.
+        Then, check the next edge clockwise around the current piece.
+        If a piece is there, move to that piece and check the same edge direction
+        as the most recent external edge.  Either there is a piece there or it is
+        open.  If open, add it to the list and check the next clockwise edge
         """
         # The search pattern is different for finding the first edge
         firstFreeEdgeNum, firstFreeEdgePiece, mostRecentEdgeDirection = (
-            self.findFirstFreeEdge()
+            self.findFirstFreeEdge(startingPiece=self.pieceList[0])
         )
         # Start the list of external edges
         externalEdgeList = [(firstFreeEdgeNum, firstFreeEdgePiece)]
         # Need edge number AND piece because 0 edge numbers are not unique mappings
         # and we want to be able to tell whether we have completed the circuit
-        """ Once the first free edge is found, store it in the externalEdgeList.
-        Then, check the next edge clockwise around the current piece. 
-        If a piece is there, move to that piece and check the same edge direction
-        as the most recent external edge.  Either there is a piece there or it is
-        open.  If open, add it to the list and check the next clockwise edge
-        """
         # Now search for the next edge
         currentPiece = firstFreeEdgePiece
         # The search direction is one step clockwise around the current piece
         searchDirection = (mostRecentEdgeDirection + 1) % 4
         while not self.externalEdgeListClosedFlag(externalEdgeList):
+            # nextFreeEdge, mostRecentEdgeDirection, nextPiece = self.findNextFreeEdge(currentPiece, mostRecentEdgeDirection)
             edgeNumToCheck = currentPiece.getEdgeNums()[searchDirection]
             if self.checkEdgeFree(edgeNumToCheck):
                 # Edge is free, add it to the list
@@ -401,7 +410,7 @@ class PuzzleFragment:
                 # Update the search direction ccw one step
                 searchDirection = (searchDirection - 1) % 4
         # External edge list is now a complete closed loop
-        # TODO: Verify?? Are all edges accounted for?
+        # Verify if requested. Are all edges accounted for?
         if verifyFlag:
             for piece in self.pieceList:
                 for edge in piece.getEdgeNums():
@@ -414,6 +423,25 @@ class PuzzleFragment:
 
         return externalEdgeList[:-1]  # drop the repeated edge before returning
 
+    def findNextFreeEdge(self, currentPiece: PuzzlePiece, mostRecentEdgeDirection: int):
+        """Find next free edge, NOT FUNCTIONAL, ignore for now"""
+        searchDirection = (mostRecentEdgeDirection + 1) % 4
+        edgeNumToCheck = currentPiece.getEdgeNums()[searchDirection]
+        if self.checkEdgeFree(edgeNumToCheck):
+            # Edge is free, add it to the list
+            nextFreeEdge = (edgeNumToCheck, currentPiece)
+            # Keep current piece, update most recent edge direction
+            mostRecentEdgeDirection = searchDirection
+            return nextFreeEdge, mostRecentEdgeDirection
+        else:
+            # Edge not free, move to the connected piece in the search
+            # direction
+            partnerEdge = self.edgePairs[edgeNumToCheck]
+            partnerPiece = self.parentPuzzleParamObj.pieceFromEdgeDict[partnerEdge]
+            currentPiece = partnerPiece
+            # Update the search direction ccw one step
+            searchDirection = (searchDirection - 1) % 4
+
     def externalEdgeListClosedFlag(
         self, orderedEdgeList: List[Tuple[int, PuzzlePiece]]
     ) -> bool:
@@ -422,16 +450,22 @@ class PuzzleFragment:
         endsMatch = orderedEdgeList[0] == orderedEdgeList[-1]
         return longEnough and endsMatch
 
-    def isValid(self):
+    def isValid(self) -> bool:
         """Check fragment validity, return True or False. Valid if it fits in the current
         parentPuzzleGrid.  This can depend on whether it is anchored or not (for example,
         a horziontal strip might be known to be invalid even if it would fit vertically)
         """
+        # TODO TODO TODO Decide on how I want to do the validity checking before really
+        # implementing this
         if self.isAnchored():
             # just check if any puzzle piece in the fragment is located outside the grid
             # Actually, there are more ways to be invalid... wrong piece type connected
             # for example?
             pass
+
+    def isAnchored(self) -> bool:
+        """Check whether the fragment is anchored or not"""
+        return self.anchorLocation is None
 
 
 # What about the idea of a puzzleState?
@@ -450,22 +484,55 @@ We also need a strategy for choosing the next edge to connect.  We'll start with
 work our way around the edge until the edge is closed. We'll always try the next numerically and type-eligible edge.
 """
 
+""" I think there are two main ways we could approach the next stage. We have a PuzzleState,
+and we want to try adding a new connection. We could 
+1) Add the connection and then check for any internal invalidity in the resulting PuzzleState
+OR
+2) Go through all the consequences of adding the connection ahead of time, and only actually
+generate the resulting PuzzleState if it will be valid.  
+Option 1 feels safer, but I feel like there could be a lot of unnecessary repeated calculations
+which it would be nice to avoid.  For example, if the new connection adds to the width of the
+puzzle, then there is no way that it could cause the height to become too large, but if we 
+are just checking a state for validity, we would be checking both the height and the width. 
+
+Perhaps it would be helpful to enumerate all the ways a connection could be invalid here:
+* A piece connects to itself
+* A fragment connects to itself in two different places (it's OK if it works out geometrically)
+* A piece is in two different fragments at the same time
+* A piece is both in the loose pieces and in a fragment at the same time
+* An edge is paired with more than one other edge
+* An edge is paired with its negative (original connection)
+* A piece repeats its original location and orientation (except the 0,0 location)
+* A piece of the wrong type is placed in an anchored fragment where it can't fit, e.g.
+  * a corner piece placed in a border or interior spot, 
+  * a border piece in a corner or interior spot
+  * an interior piece in a corner or border spot
+  * a border piece oriented with the flat side not towards the puzzle border
+  * a corner piece oriented incorrectly
+* A floating fragment is too large to fit in the puzzle (e.g. has a linear dimension
+  which is longer than either puzzle dimension)
+* There is no conceivable way that all the puzzle fragments could simultaneously fit 
+  within the puzzle grid because there is no way for the shapes to fit together. I don't
+  know whether this will be worth checking or not.  It sounds potentially hard to code, and
+  if it doesn't work, it may become more obvious soon as more connections are added. 
+
+Some of the above conditions seem like they will be best applied to narrow down the edges
+we would try. This is great because then we may have fewer conditions to check afterwards.
+
+"""
+
 
 # MARK: PuzzleState
 class PuzzleState:
     def __init__(
         self,
-        nRows: int,
-        nCols: int,
-        pairedEdgesDict: Dict,
-        unpairedEdgesList: List,
+        parent: "PuzzleParameters",
+        edgePairs: EdgePairSet,
         fragments: List[PuzzleFragment],
         loosePieces: List[PuzzlePiece],
     ):
-        self.nRows = nRows
-        self.nCols = nCols
-        self.pairedEdgesDict = pairedEdgesDict
-        self.unpairedEdgesList = unpairedEdgesList
+        self.parent = parent
+        self.edgePairs = edgePairs
         self.fragments = fragments
         self.loosePieces = loosePieces
 
@@ -482,7 +549,7 @@ class PuzzleState:
         """
         otherEdgesToPair = (-e for e in edgesToPair)
 
-        AddConnectionError
+        raise AddConnectionError
 
         return newPuzzleState
 
@@ -520,12 +587,13 @@ class PuzzleParameters:
         self.pieceFromEdgeDict = pieceFromEdgeDict
 
     def generatePieces(self) -> List[PuzzlePiece]:
-        # Create Puzzle Pieces in initial orientation with initial unique edge numberings
-        # Edge numbering rules:
+        """Create Puzzle Pieces in initial orientation with initial unique edge numberings
+        Edge numbering rules:
         #   Outer flat edges are of type 0 and then vertical edges are numbered in reading
         #   order, then horizontal edges are numbered in reading order.  Polarity is assigned
         #   such that the left or upper side of the edge has polarity +1, while the right or
         #   lower side has polarity -1.  Straight edges are of type 0 and have polarity 0.
+        """
         nRows = self.nRows
         nCols = self.nCols
 
@@ -567,8 +635,8 @@ class PuzzleParameters:
                 signedEdgeTypes = (e * p for e, p in zip(edgeTypes, polarities))
 
                 # Generate the pieces
-                p = PuzzlePiece(rIdx, cIdx, signedEdgeTypes)
-                pieceList.append(p)
+                piece = PuzzlePiece(rIdx, cIdx, signedEdgeTypes)
+                pieceList.append(piece)
 
         # self.pieceList = pieceList
         return pieceList
@@ -578,17 +646,7 @@ class PuzzleParameters:
         This should include anchoring the first corner piece and designating it as
         the first fragment.
         """
-
         pieceList = self.pieceList
-        # Make lookup dictionary to go from signed edge to the piece it is on
-        pieceFromEdgeDict = dict()
-        unpairedEdgesList = []
-        for piece in pieceList:
-            signedEdges = piece.getSignedEdges()
-            for edge in signedEdges:
-                unpairedEdgesList.append(edge)
-                pieceFromEdgeDict[edge] = piece
-
         # Choose the first corner piece as the one to stay in position
         # (we can do this without loss of generality, because any resulting
         # alternate assembled puzzle could be rotated to put this corner in
@@ -599,19 +657,20 @@ class PuzzleParameters:
         fragmentAnchor = AnchorLocation(
             pieceListIdx=0, anchorGridPosition=(0, 0), anchorOrientation=0
         )
-        startingCornerPiece.newPosition = [0, 0]
-        startingCornerPiece.newOrientation = 0
+        # startingCornerPiece.newPosition = [0, 0]
+        # startingCornerPiece.newOrientation = 0
+        edgePairs = EdgePairSet()
         startingFragment = PuzzleFragment(
+            parentPuzzleParamObj=self,
             pieceList=[startingCornerPiece],
-            connectionList=bidict(),
+            edgePairs=edgePairs,
             anchorLocation=fragmentAnchor,
         )
         #
         initPuzzleState = PuzzleState(
             self.nRows,
             self.nCols,
-            pairedEdgesDict=dict(),
-            unpairedEdgesList=unpairedEdgesList,
+            edgePairs=edgePairs,
             fragments=[startingFragment],
             loosePieces=pieceList[1:],
         )
@@ -686,6 +745,30 @@ class InconsistentFragmentCoordinatesError(Exception):
 
 
 class GetOrderedEdgesVerificationError(Exception):
+    pass
+
+
+class WrongEdgeCountError(Exception):
+    pass
+
+
+class InvalidPieceError(Exception):
+    pass
+
+
+class UnknownPieceTypeError(Exception):
+    pass
+
+
+class EdgePairError(Exception):
+    pass
+
+
+class LoosePiecesInFragmentError(Exception):
+    pass
+
+
+class FirstFreeEdgeError(Exception):
     pass
 
 
