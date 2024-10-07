@@ -1,11 +1,10 @@
 # For exploring Parker Alternative Puzzles
 # import typing
-from typing import Tuple, Optional, List, Dict, NamedTuple
+from typing import Tuple, Optional, List, Dict, NamedTuple, Set
 import numpy as np
 from enum import Enum
 
 # from collections import namedtuple
-
 # from bidict import bidict
 
 
@@ -65,8 +64,27 @@ class EdgePairSet:
 
 class PieceType(Enum):
     CORNER = 2
-    EDGE = 1
+    BORDER = 1
     INTERIOR = 0
+
+
+class EdgeClass(Enum):
+    OUTER_BORDER = 0
+    CW_FROM_CORNER = 1
+    CCW_FROM_CORNER = 2
+    CW_FROM_BORDER = 3
+    CCW_FROM_BORDER = 4
+    INTERIOR = 5
+
+
+partnerEdgeClasses = {
+    EdgeClass.CW_FROM_CORNER: (EdgeClass.CCW_FROM_BORDER),
+    EdgeClass.CCW_FROM_CORNER: (EdgeClass.CW_FROM_BORDER),
+    EdgeClass.CCW_FROM_BORDER: (EdgeClass.CW_FROM_CORNER, EdgeClass.CW_FROM_BORDER),
+    EdgeClass.CW_FROM_BORDER: (EdgeClass.CCW_FROM_CORNER, EdgeClass.CCW_FROM_BORDER),
+    EdgeClass.OUTER_BORDER: (),  # should this be None?
+    EdgeClass.INTERIOR: (EdgeClass.INTERIOR,),
+}
 
 
 # Define a named tuple for anchor location info
@@ -115,7 +133,7 @@ class PuzzlePiece:
                 )
             pieceType = PieceType.CORNER
         elif numStraightEdges == 1:
-            pieceType = PieceType.EDGE
+            pieceType = PieceType.BORDER
         elif numStraightEdges == 0:
             pieceType = PieceType.INTERIOR
         else:
@@ -123,6 +141,48 @@ class PuzzlePiece:
                 f"Unknown piece type with {numStraightEdges} edges."
             )
         return pieceType
+
+    def getEdgeClasses(self):
+        """Return a tuple of the edge class associated with each edge"""
+        edgeNums = self.getEdgeNums()
+        pieceType = self.pieceType
+        edgeClasses = []
+        for dirIdx, edgeNum in enumerate(edgeNums):
+            if edgeNum == 0:
+                edgeClass = EdgeClass.OUTER_BORDER
+            else:
+                # Edge number is nonzero
+                if pieceType == PieceType.INTERIOR:
+                    edgeClasses.append(EdgeClass.INTERIOR)
+                else:
+                    # This piece has an outer border, the edge class
+                    # depends on where this edge stands relative to
+                    # outer boarder edge(s) and on the piece type
+                    cwDirIdx = (dirIdx + 1) % 4
+                    ccwDirIdx = (dirIdx - 1) % 4
+                    cwFromBorder = edgeNums[cwDirIdx] == 0
+                    ccwFromBorder = edgeNums[ccwDirIdx] == 0
+                    if cwFromBorder:
+                        edgeClass = (
+                            EdgeClass.CW_FROM_BORDER
+                            if pieceType == PieceType.BORDER
+                            else EdgeClass.CW_FROM_CORNER
+                        )
+                    elif ccwFromBorder:
+                        edgeClass = (
+                            EdgeClass.CCW_FROM_BORDER
+                            if pieceType == PieceType.BORDER
+                            else EdgeClass.CCW_FROM_CORNER
+                        )
+                    else:
+                        assert (
+                            pieceType == PieceType.BORDER,
+                            "To get here, the piece type should only ever be a border edge piece!",
+                        )
+                        edgeClass = EdgeClass.INTERIOR
+            # Store edge class
+            edgeClasses.append(edgeClass)
+        return tuple(edgeClasses)
 
     def getCWEdges(self, startIdx) -> Tuple[Tuple[int], Tuple[int]]:
         """Get the clockwise sequence of edges, starting from startIdx"""
@@ -141,6 +201,14 @@ class PuzzlePiece:
         return "\n  ".join(lines)
 
 
+def rotateCoord(r, c, rotationOffset):
+    """Rotate row,col coordinates by 90deg clockwise rotationOffset times"""
+    rotatedRow, rotatedCol = r, c
+    for idx in range(rotationOffset):
+        rotatedRow, rotatedCol = (rotatedCol, -rotatedRow)
+    return rotatedRow, rotatedCol
+
+
 # MARK: PuzzleFragment
 class PuzzleFragment:
     """A representation of more than one puzzle piece, either with a fixed location (anchored),
@@ -151,9 +219,6 @@ class PuzzleFragment:
       there must be a corner piece)
     A puzzle fragment can be defined by the set of pieces included, and by the set of connections
     linking them.
-
-    connectionList = Nx2 array of edges which are connected among the pieces. Each piece
-    has a unique set of edges, so just knowing the edge number and sign is enough.
     """
 
     def __init__(
@@ -182,7 +247,8 @@ class PuzzleFragment:
     def assignFragmentCoordinates(self):
         """Each piece within the fragment needs to be assigned local
         fragment coordinates.  Start from pieceList[0] and work out
-        from there. When complete, all fragmetn
+        from there. When complete, all fragment pieces should have
+        coordinates assigned.
         """
         startingPiece = self.pieceList[0]
         self.fragmentCoordDict[startingPiece] = (0, 0, 0)
@@ -238,6 +304,39 @@ class PuzzleFragment:
         if not self.checkAllFragmentCoordinatesAssigned():
             raise LoosePiecesInFragmentError
         # Otherwise, everything is consistent and all pieces have been assigned local fragment coordinates
+        # IF the fragment is anchored, I think we should convert all of these local
+        # coordinates to true puzzle coordinates
+        if self.isAnchored():
+            # Convert local coord to absolute coord
+            anchorPiece = self.pieceList[self.anchorLocation.pieceListIdx]
+            anchorRow, anchorCol = self.anchorLocation.anchorGridPosition
+            anchorRotation = self.anchorLocation.anchorOrientation
+            localFragCoord = self.fragmentCoordDict[anchorPiece]
+            localRowCoord = localFragCoord.rowCoord
+            localColCoord = localFragCoord.colCoord
+            localRotation = localFragCoord.rotationCount
+            rowOffset = anchorRow - localRowCoord
+            colOffset = anchorCol - localColCoord
+            rotationOffset = (anchorRotation - localRotation) % 4
+            for piece in self.pieceList:
+                # Get old fragment coordinate, translate first then apply rotation
+                oldFragCoord = self.fragmentCoordDict[piece]
+                translatedRowCoord = oldFragCoord.rowCoord + rowOffset
+                translatedColCoord = oldFragCoord.colCoord + colOffset
+                # Apply rotation
+                # if the rotation offset is 1, the whole fragment should rotate clockwise
+                # 90 deg around the origin.  So, a piece at (r,c) should end up at (c, -r)
+                rotatedRowCoord, rotatedColCoord = rotateCoord(
+                    translatedRowCoord, translatedColCoord, rotationOffset
+                )
+                rotatedRotationCount = oldFragCoord.rotationCount + rotationOffset
+                newFragCoord = FragmentCoordinate(
+                    rotatedRowCoord,
+                    rotatedColCoord,
+                    rotatedRotationCount,
+                )
+                # Replace with updated coordinate (should we update the existing one instead of making a new one?)
+                self.fragmentCoordDict[piece] = newFragCoord
 
     def calcFragmentCoord(
         self,
@@ -368,7 +467,9 @@ class PuzzleFragment:
         # return self.edgePairs[edgeNum] is None
         return edgeNum in freeEdges
 
-    def getOrderedExternalEdgeList(self, verifyFlag: bool = True):
+    def getOrderedExternalEdgeList(
+        self, verifyFlag: bool = True
+    ) -> List[List[Tuple[int, PuzzlePiece]]]:
         """Identify a starting free (unconnected) edge.  Then, follow the open
         edges clockwise around the entire fragment. If verifyFlag, then
         do the extra check to make sure all edges are either in the list of
@@ -410,6 +511,12 @@ class PuzzleFragment:
                 # Update the search direction ccw one step
                 searchDirection = (searchDirection - 1) % 4
         # External edge list is now a complete closed loop
+        # TODO: what about the case where there is a closed loop but a hole in the middle?
+        # Such as when the outer border is finished!  Also, we could start in a hole, and
+        # never get to the outside this way.  Need to handle these topological quirky situations
+        # Could probably just start at the first remaining edge and then make another closed loop,
+        # and repeat until there are no more non-included edges.
+
         # Verify if requested. Are all edges accounted for?
         if verifyFlag:
             for piece in self.pieceList:
@@ -421,7 +528,7 @@ class PuzzleFragment:
                             f"Edge {edge} is in neither the external nor the paired edge lists!"
                         )
 
-        return externalEdgeList[:-1]  # drop the repeated edge before returning
+        return [externalEdgeList[:-1]]  # drop the repeated edge before returning
 
     def findNextFreeEdge(self, currentPiece: PuzzlePiece, mostRecentEdgeDirection: int):
         """Find next free edge, NOT FUNCTIONAL, ignore for now"""
@@ -496,9 +603,9 @@ puzzle, then there is no way that it could cause the height to become too large,
 are just checking a state for validity, we would be checking both the height and the width. 
 
 Perhaps it would be helpful to enumerate all the ways a connection could be invalid here:
-* A piece connects to itself
+** A piece connects to itself
 * A fragment connects to itself in two different places (it's OK if it works out geometrically)
-* A piece is in two different fragments at the same time
+**? A piece is in two different fragments at the same time
 * A piece is both in the loose pieces and in a fragment at the same time
 * An edge is paired with more than one other edge
 * An edge is paired with its negative (original connection)
@@ -518,6 +625,33 @@ Perhaps it would be helpful to enumerate all the ways a connection could be inva
 
 Some of the above conditions seem like they will be best applied to narrow down the edges
 we would try. This is great because then we may have fewer conditions to check afterwards.
+
+Others, it seems like it might make more sense to check after applying the potential connection.
+** for check before trying
+*** for check after
+
+I would like to get clear about the steps:
+I have a puzzle state, I have next edge to connect to
+I then need to make a list of possible edges to try.
+That list should be narrowed down to be as short as possible
+* narrowed by piece type (corner, border, interior)
+* narrowed by absolute location (can't be an edge on the piece which was originally there)
+Anything else ahead of time?
+Loop over those edges and try them, reject if:
+* connecting fragments which end up outside the puzzle
+* if complementary connection is
+    * self connection
+    * makes invalid floating fragment
+
+Code to write next: 
+* find the next edge to connect to (first one on ordered free edges of anchored fragment
+  which is not numbered 0)
+* define edge types (cw_from_border, ccw_from_border, cw_from_corner, ccw_from_corner, interior, outerBorder) make easy lookup
+* define desired edge type from anchored location of next edge to connect to
+* narrow edge list from all free edges to the proper type of edge
+    * consider narrowing based on complimentary edge? (harder?) 
+* try it! then complimentary connection.  Check for invalidity... If valid, return new puzzle state
+
 
 """
 
@@ -557,16 +691,134 @@ class PuzzleState:
         """Select the next active edge to connect to
         This should be a signed integer.
         """
-        self.fragments[0].pieceList[-1]
-        return 1
+        activeFragment = None
+        # Find the first active fragment
+        for fragment in self.fragments:
+            if fragment.isAnchored():
+                activeFragment = fragment
+                break
+        if activeFragment is None:
+            raise Exception("No anchored fragment!")
+        edgeLoops = activeFragment.getOrderedExternalEdgeList()
+        # Find the first nonzero edge
+        activeEdge = None
+        for edgeList in edgeLoops:
+            for edge in edgeList:
+                if edge != 0:
+                    activeEdge = edge
+                    return activeEdge
+        # No nonzero edges found, raise an exception
+        raise Exception("No nonzero edges found on the active fragment")
 
-    def findCandidateEdges(self, activeEdge) -> Tuple[int]:
+    def findCandidateEdges(self, activeEdge: int) -> Tuple[int]:
+        """Given the current puzzle state, and the active
+        edge which we are trying to connect to, return as small
+        a list of candidate edges as possible.
+        """
+        # The first cut is determined by the type of edge of the active edge
+        activeEdgeClass = self.getEdgeClass(activeEdge)
+        candidateEdgeClasses = partnerEdgeClasses[activeEdgeClass]
+        candidateEdges = []
+        for edgeClass in candidateEdgeClasses:
+            candidateEdges.extend(self.getEdgesFromEdgeClass(edgeClass))
+        # Remove any edges which are already paired
+        alreadyPairedEdges = self.edgePairs.getFlatEdgePairList()
+        candidateEdges = [
+            edge for edge in candidateEdges if edge not in alreadyPairedEdges
+        ]
+        # Narrow down by piece type (geometrical considerations, especially for
+        # anchored fragments)
+        allowedPieceTypes = self.getAllowedPieceTypes(activeEdge)
+        candidateEdges = [
+            edge
+            for edge in candidateEdges
+            if self.getPieceTypeFromEdge(edge) in allowedPieceTypes
+        ]
+        # Any other considerations before trying?
 
-        return tuple(edgeCandidates)
+        return tuple(candidateEdges)
+
+    def getPieceTypeFromEdge(self, edgeNum: int) -> PieceType:
+        """Get Piece type from edge number"""
+        if edgeNum == 0:
+            raise ZeroEdgeNumberNotUniqueError(
+                "Can't get piece type from zero edge number because it is not unique!"
+            )
+        piece = self.getPieceFromEdge(edgeNum)
+        return self.parent.pieceTypeFromPiece(piece)
+
+    def getAllowedPieceTypes(self, activeEdge) -> Tuple[PieceType]:
+        """Based on geometrical considerations, what piece type or types could
+        go in the location complementary to the active edge.  This should be
+        straightforward to discern if the active edge is on an anchored
+        fragment, but might be trickier to narrow down for a floating fragment.
+        """
+        activePiece = self.getPieceFromEdge(activeEdge)
+        activeFragment = self.getFragmentFromEdge(activeEdge)
+        if activeFragment is None:
+            raise ActiveEdgeNotOnFragmentError(
+                "The active edge was not found on a puzzle fragment!"
+            )
+        lastRow = self.parent.nRows - 1
+        lastCol = self.parent.nCols - 1
+        if activeFragment.isAnchored():
+            activePieceCoord = activeFragment.fragmentCoordDict[activePiece]
+            activeEdgeOrigDir = activePiece.getEdgeNums().index[activeEdge]
+            activeEdgeDir = activePieceCoord.rotationCount + activeEdgeOrigDir
+            # N,E,S,W
+            rowOffset = (-1, 0, 1, 0)[activeEdgeDir]
+            colOffset = (0, 1, -1, 0)[activeEdgeDir]
+            partnerPieceRow = activePieceCoord.rowCoord + rowOffset
+            partnerPieceCol = activePieceCoord.colCoord + colOffset
+            onHorizBorder = (partnerPieceRow == 0) or (partnerPieceRow == lastRow)
+            onVertBorder = (partnerPieceCol == 0) or (partnerPieceCol == lastCol)
+            if (not onHorizBorder) and (not onVertBorder):
+                allowedPieceTypes = PieceType.INTERIOR
+            elif onHorizBorder and onVertBorder:
+                allowedPieceTypes = PieceType.CORNER
+            else:
+                # Not interior or corner, must be on border
+                allowedPieceTypes = PieceType.BORDER
+        else:
+            # TODO: Add conditions narrowing down allowed piece types
+            # For now, we are just allowing any piece type on the active
+            # edge of a floating fragment.
+            allowedPieceTypes = (PieceType.CORNER, PieceType.BORDER, PieceType.INTERIOR)
+
+    def getFragmentFromEdge(self, edgeNum: int) -> Optional[PuzzleFragment]:
+        """Find the fragment the given edge is on.  Return None if there is
+        no fragment which has this edge (or maybe throw an error?)
+        """
+        activePiece = self.getPieceFromEdge(edgeNum)
+        for fragment in self.fragments:
+            if activePiece in fragment.pieceList:
+                return fragment
+        # Not in any fragment
+        return None
+
+    def getEdgeClass(self, edgeNum):
+        return self.parent.edgeClassFromEdge[edgeNum]
+
+    def getPieceFromEdge(self, edgeNum):
+        return self.parent.pieceFromEdgeDict[edgeNum]
+
+    def getEdgesFromEdgeClass(self, edgeClass):
+        return self.parent.edgesFromEdgeClass[edgeClass]
+
+    def getComplementaryEdgeClasses(self, edgeClass):
+        return partnerEdgeClasses[edgeClass]
 
     def getPieceList(self) -> Tuple[PuzzlePiece]:
-        """ """
-        return pieceList
+        return self.parent.pieceList
+
+    def isComplete(self) -> bool:
+        """Return true if the puzzle state represents
+        a complete puzzle.  For now we identify that by there
+        being no more loose pieces and only one fragment. Should
+        there be any other conditions?"""
+        zeroLoosePieces = len(self.loosePieces) == 0
+        onlyOneFragment = len(self.fragments) == 1
+        return zeroLoosePieces and onlyOneFragment
 
 
 # MARK: PuzzParameters
@@ -577,14 +829,13 @@ class PuzzleParameters:
         self.nRows = nRows
         self.nCols = nCols
         self.pieceList = self.generatePieces()
+        (
+            self.pieceFromEdgeDict,
+            self.pieceTypeFromPiece,
+            self.edgesFromEdgeClass,
+            self.edgeClassFromEdge,
+        ) = self.classifyPiecesAndEdges()
         self.initPuzzleState = self.generateInitialPuzzleState()
-        # Build handy lookup table for pieces from edge numbers
-        pieceFromEdgeDict = dict()
-        for piece in self.pieceList:
-            for edgeNum in piece.getEdgeNums():
-                if edgeNum != 0:
-                    pieceFromEdgeDict[edgeNum] = piece
-        self.pieceFromEdgeDict = pieceFromEdgeDict
 
     def generatePieces(self) -> List[PuzzlePiece]:
         """Create Puzzle Pieces in initial orientation with initial unique edge numberings
@@ -675,6 +926,38 @@ class PuzzleParameters:
             loosePieces=pieceList[1:],
         )
         return initPuzzleState
+
+    def classifyPiecesAndEdges(
+        self,
+    ) -> Tuple[
+        Dict[int, PuzzlePiece],
+        Dict[PuzzlePiece, PieceType],
+        Dict[EdgeClass, List[int]],
+        Dict[int, EdgeClass],
+    ]:
+        """Build the dicts which allow easy lookups of edge class from edge number,
+        edges from edge class, piece from edge number, and piece type from piece.
+        """
+
+        edgesFromEdgeClass = {edgeClass: [] for edgeClass in EdgeClass}
+        edgeClassFromEdge = dict()
+        pieceFromEdgeDict = dict()
+        pieceTypeFromPiece = dict()
+        for piece in self.pieceList:
+            pieceTypeFromPiece[piece] = piece.getPieceType()
+            pieceEdgeNums = piece.getEdgeNums()
+            pieceEdgeClasses = piece.getEdgeClasses()
+            for edgeNum, edgeClass in zip(pieceEdgeNums, pieceEdgeClasses):
+                if edgeNum != 0:
+                    pieceFromEdgeDict[edgeNum] = piece
+                edgeClassFromEdge[edgeNum] = edgeClass
+                edgesFromEdgeClass[edgeClass].append(edgeNum)
+        return (
+            pieceFromEdgeDict,
+            pieceTypeFromPiece,
+            edgesFromEdgeClass,
+            edgeClassFromEdge,
+        )
 
 
 # Consider, do we want to categorize the edges on construction (outer, rim_cw, rim_ccw, internal)
@@ -769,6 +1052,14 @@ class LoosePiecesInFragmentError(Exception):
 
 
 class FirstFreeEdgeError(Exception):
+    pass
+
+
+class ActiveEdgeNotOnFragmentError(Exception):
+    pass
+
+
+class ZeroEdgeNumberNotUniqueError(Exception):
     pass
 
 
