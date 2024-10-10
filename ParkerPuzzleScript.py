@@ -119,7 +119,7 @@ class EdgeClass(Enum):
     INTERIOR = 5
 
 
-partnerEdgeClasses = {
+partnerEdgeClasses: Dict[EdgeClass, Tuple[EdgeClass]] = {
     EdgeClass.CW_FROM_CORNER: (EdgeClass.CCW_FROM_BORDER),
     EdgeClass.CCW_FROM_CORNER: (EdgeClass.CW_FROM_BORDER),
     EdgeClass.CCW_FROM_BORDER: (EdgeClass.CW_FROM_CORNER, EdgeClass.CW_FROM_BORDER),
@@ -256,12 +256,70 @@ class PuzzlePiece:
         return "\n  ".join(lines)
 
 
+# MARK: FUNCTIONS
 def rotateCoord(r, c, rotationOffset):
     """Rotate row,col coordinates by 90deg clockwise rotationOffset times"""
     rotatedRow, rotatedCol = r, c
     for idx in range(rotationOffset):
         rotatedRow, rotatedCol = (rotatedCol, -rotatedRow)
     return rotatedRow, rotatedCol
+
+
+def calcFragEdgePairs(
+    edgePairs: EdgePairSet, pieceList: List[PuzzlePiece]
+) -> FragmentEdgePairSet:
+    """Filter the edge pairs (from a puzzle state) to include only those
+    edges present in the pieces in the piece list.
+    """
+    statePairedEdges = edgePairs.getFlatEdgePairList()
+    # Loop over all piece edges and keep those which are in the supplied edgePairs
+    edgesToInclude = [
+        e for piece in pieceList for e in piece.getEdgeNums() if e in statePairedEdges
+    ]
+    fragEdgePairs = FragmentEdgePairSet()
+    for e in edgesToInclude:
+        partner = edgePairs[e]
+        fragEdgePairs.addConnection(e, partner)
+    # Note that this adds each edge twice, but it feels like it might be more
+    # inefficent to try to filter it down to one pass, so I'm just going to
+    # leave it.
+    return fragEdgePairs
+
+
+def calcFragmentCoord(
+    anchorPiece: PuzzlePiece,
+    anchorEdgeNum: int,
+    anchorPieceCoord: FragmentCoordinate,
+    partnerPiece: PuzzlePiece,
+    partnerEdgeNum: int,
+):
+    """Calculate the relative fragment coordinate for the partner piece,
+    based on the location of the anchor piece, its orientation, and the
+    linked edges orientations.
+    """
+    # Determine which way the anchor edge is facing in the fragment
+    # coordinate system
+    originalOrientation = anchorPiece.getEdgeNums().index(anchorEdgeNum)
+    anchorEdgeOrientation = (originalOrientation + anchorPieceCoord.rotationCount) % 4
+    # The partner edge faces the opposite direction
+    partnerEdgeOrientation = (anchorEdgeOrientation + 2) % 4
+    # How rotated is this orientation from the original orientation?
+    partnerEdgeOriginalOrientation = partnerPiece.getEdgeNums().index(partnerEdgeNum)
+    partnerPieceRotationCount = (
+        partnerEdgeOrientation - partnerEdgeOriginalOrientation
+    ) % 4
+    # Offsets
+    N, E, S, W = ((-1, 0), (0, 1), (1, 0), (0, -1))
+    offsets = (N, E, S, W)
+    offset = offsets[anchorEdgeOrientation]
+    partnerPieceRowCoord = anchorPieceCoord.rowCoord + offset[0]
+    partnerPieceColCoord = anchorPieceCoord.colCoord + offset[1]
+    newFragCoord = FragmentCoordinate(
+        rowCoord=partnerPieceRowCoord,
+        colCoord=partnerPieceColCoord,
+        rotationCount=partnerPieceRotationCount,
+    )
+    return newFragCoord
 
 
 # MARK: PuzzleFragment
@@ -278,53 +336,37 @@ class PuzzleFragment:
 
     def __init__(
         self,
-        parentPuzzleState: "PuzzleState",
+        puzzleParameters: "PuzzleParameters",
         pieceList: List[PuzzlePiece],
-        fragEdgePairs: Optional[FragmentEdgePairSet] = None,
+        fragEdgePairs: Optional[FragmentEdgePairSet],
         anchorLocation: Optional[AnchorLocation] = None,
-        fragmentCoordDict: Optional[
+        _fragmentCoordDict: Optional[
             FragmentCoordDict[PuzzlePiece, FragmentCoordinate]
         ] = None,
         _cachedFreeEdgesList: Optional[Tuple[int]] = None,
     ):
-        self.parentPuzzleState = parentPuzzleState
+        self.puzzleParameters = puzzleParameters
         self.anchorLocation = anchorLocation
         self.pieceList = pieceList
-        if fragEdgePairs is None:
-            # Derive from parent puzzle state
-            self.fragEdgePairs = self.calcFragEdgePairs(parentPuzzleState, pieceList)
-        else:
-            self.fragEdgePairs = fragEdgePairs
-            # ^^ Should we verify this is valid?? ^^
-        if fragmentCoordDict is None:
-            self.fragmentCoordDict = FragmentCoordDict()
+        self.fragEdgePairs = fragEdgePairs
+        # ^^ Should we verify this is valid?? ^^
+        if _fragmentCoordDict is None:
+            self._fragmentCoordDict = FragmentCoordDict()
             self.assignFragmentCoordinates()
         else:
             # TODO: Validate this is OK first?
-            self.fragmentCoordDict = fragmentCoordDict
+            self._fragmentCoordDict = _fragmentCoordDict
         self._cachedFreeEdgesList = _cachedFreeEdgesList
         if self._cachedFreeEdgesList is None:
             self.updateCachedFreeEdgesList()
 
-    def calcFragEdgePairs(
-        puzzleState: "PuzzleState", pieceList: List[PuzzlePiece]
-    ) -> FragmentEdgePairSet:
-        """Filter the edge pairs of the puzzle state to include only those
-        edges present in the pieces in the piece list.
-        """
-        statePairedEdges = puzzleState.edgePairs.getFlatEdgePairList()
-        # Loop over all piece edges and keep those which are in the state edgePairs
-        edgesToInclude = [
-            e
-            for piece in pieceList
-            for e in piece.getEdgeNums()
-            if e in statePairedEdges
-        ]
-        fragEdgePairs = FragmentEdgePairSet()
-        for e in edgesToInclude:
-            partner = puzzleState.edgePairs[e]
-            fragEdgePairs.addConnection(e, partner)
-        return fragEdgePairs
+    def getFragCoord(
+        self, piece: PuzzlePiece
+    ) ->FragmentCoordinate:
+        return self._fragmentCoordDict[piece]
+    
+    def setFragCoord(self, piece:PuzzlePiece, fragCoord:FragmentCoordinate):
+        self._fragmentCoordDict[piece] = fragCoord
 
     def assignFragmentCoordinates(self):
         """Each piece within the fragment needs to be assigned local
@@ -333,7 +375,7 @@ class PuzzleFragment:
         coordinates assigned.
         """
         startingPiece = self.pieceList[0]
-        self.fragmentCoordDict[startingPiece] = FragmentCoordinate(0, 0, 0)
+        self.setFragCoord(startingPiece) = FragmentCoordinate(0, 0, 0)
         piecesToCheckNext = set([startingPiece])
         # N, E, S, W = ((-1, 0), (0, 1), (1, 0), (0, -1))
         # offsets = (N, E, S, W)
@@ -356,7 +398,7 @@ class PuzzleFragment:
                         partnerCoord = self.calcFragmentCoord(
                             piece,
                             edgeNum,
-                            self.fragmentCoordDict[piece],
+                            self.getFragCoord(piece),
                             partnerPiece,
                             partnerEdgeNum,
                         )
@@ -367,9 +409,9 @@ class PuzzleFragment:
                         # If the partner piece does not have a fragment coordinate already, then
                         # assign it and add it to the list of pieces to check connections of next
                         try:
-                            existingFragCoord = self.fragmentCoordDict[
+                            existingFragCoord = self.getFragCoord(
                                 partnerPiece
-                            ]  # may throw KeyError
+                            )  # may throw KeyError
                             # Didn't throw error, continue to check if it matches
                             if existingFragCoord != partnerCoord:
                                 raise InconsistentFragmentCoordinatesError(
@@ -377,7 +419,7 @@ class PuzzleFragment:
                                 )
                         except KeyError:
                             # No current fragment coordinate, assign it
-                            self.fragmentCoordDict[partnerPiece] = partnerCoord
+                            self.getFragCoord(partnerPiece) = partnerCoord
                             # Add piece to the set of pieces to check the edges of next
                             piecesToCheckNext.add(partnerPiece)
                 # Finished looping over current list of pieces to check
@@ -393,7 +435,11 @@ class PuzzleFragment:
             anchorPiece = self.pieceList[self.anchorLocation.pieceListIdx]
             anchorRow, anchorCol = self.anchorLocation.anchorGridPosition
             anchorRotation = self.anchorLocation.anchorOrientation
-            localFragCoord = self.fragmentCoordDict[anchorPiece]
+            localFragCoord = self.getFragCoord(anchorPiece)
+            if localFragCoord is None:
+                raise InconsistentFragmentCoordinatesError(
+                    "Missing fragment coordinate on anchor piece!"
+                )
             localRowCoord = localFragCoord.rowCoord
             localColCoord = localFragCoord.colCoord
             localRotation = localFragCoord.rotationCount
@@ -402,7 +448,7 @@ class PuzzleFragment:
             rotationOffset = (anchorRotation - localRotation) % 4
             for piece in self.pieceList:
                 # Get old fragment coordinate, translate first then apply rotation
-                oldFragCoord = self.fragmentCoordDict[piece]
+                oldFragCoord = self.getFragCoord(piece)
                 translatedRowCoord = oldFragCoord.rowCoord + rowOffset
                 translatedColCoord = oldFragCoord.colCoord + colOffset
                 # Apply rotation
@@ -418,61 +464,21 @@ class PuzzleFragment:
                     rotatedRotationCount,
                 )
                 # Replace with updated coordinate (should we update the existing one instead of making a new one?)
-                self.fragmentCoordDict[piece] = newFragCoord
-
-    def calcFragmentCoord(
-        self,
-        anchorPiece: PuzzlePiece,
-        anchorEdgeNum: int,
-        anchorPieceCoord: FragmentCoordinate,
-        partnerPiece: PuzzlePiece,
-        partnerEdgeNum: int,
-    ):
-        """Calculate the relative fragment coordinate for the partner piece,
-        based on the location of the anchor piece, its orientation, and the
-        linked edges orientations.
-        TODO: no need for this to be instance method for PuzzleFragment, OR,
-        could drop the anchorPieceCoord input, which can be dervied from self
-        and anchorPiece.
-        """
-        # Determine which way the anchor edge is facing in the fragment
-        # coordinate system
-        originalOrientation = anchorPiece.getEdgeNums().index(anchorEdgeNum)
-        anchorEdgeOrientation = (
-            originalOrientation + anchorPieceCoord.rotationCount
-        ) % 4
-        # The partner edge faces the opposite direction
-        partnerEdgeOrientation = (anchorEdgeOrientation + 2) % 4
-        # How rotated is this orientation from the original orientation?
-        partnerEdgeOriginalOrientation = partnerPiece.getEdgeNums().index(
-            partnerEdgeNum
-        )
-        partnerPieceRotationCount = (
-            partnerEdgeOrientation - partnerEdgeOriginalOrientation
-        ) % 4
-
-        # Offsets
-        N, E, S, W = ((-1, 0), (0, 1), (1, 0), (0, -1))
-        offsets = (N, E, S, W)
-        offset = offsets[anchorEdgeOrientation]
-        partnerPieceRowCoord = anchorPieceCoord.rowCoord + offset[0]
-        partnerPieceColCoord = anchorPieceCoord.colCoord + offset[1]
-        newFragCoord = FragmentCoordinate(
-            rowCoord=partnerPieceRowCoord,
-            colCoord=partnerPieceColCoord,
-            rotationCount=partnerPieceRotationCount,
-        )
-        return newFragCoord
+                self.getFragCoord(piece) = newFragCoord
 
     def checkAllFragmentCoordinatesAssigned(self):
         """Return True if all pieces have fragment coordinates
         assigned, return False otherwise.
         """
-        assignedFlags = [
-            piece in self.fragmentCoordDict.keys() for piece in self.pieceList
-        ]
-        allAssignedFlag = np.all(assignedFlags)
-        return allAssignedFlag
+        try:
+            for piece in self.pieceList:
+                coord = self.getFragCoord(piece)
+        except KeyError:
+            # A piece was not a key!
+            return False
+        # We made it, all pieces were keys
+        return True
+
 
     def getFreeEdgesList(self):
         if self._cachedFreeEdgesList is None:
@@ -518,7 +524,7 @@ class PuzzleFragment:
         numPiecesChecked = 0
         while numPiecesChecked <= len(self.pieceList):
             # Get the local rotation of the current piece (in fragment coord system)
-            localRot = self.fragmentCoordDict[curPiece].rotationCount
+            localRot = self.getFragCoord(curPiece).rotationCount
             # Then the edge numbers clockwise starting from the search direction
             edgeNums = curPiece.getCWEdges((localRot + searchDirection) % 4)
             # Check each edge, stop at the first free one
@@ -557,7 +563,7 @@ class PuzzleFragment:
                 "Tried to check the edge direction of a non-unique edge number (0)!"
             )
         piece = self.parentPuzzleState.getPieceFromEdge(edgeNum)
-        coord = self.fragmentCoordDict[piece]
+        coord = self.getFragCoord(piece)
         edgeDirection = piece.getCWEdges(coord.rotationCount).index(edgeNum)
         return edgeDirection
 
@@ -671,13 +677,13 @@ class PuzzleFragment:
     def deepCopy(self) -> "PuzzleFragment":
         pieceListCopy = [*self.pieceList]
         anchorLocCopy = self.anchorLocation.deepCopy() if self.anchorLocation else None
-        coordDictCopy = self.fragmentCoordDict.deepCopy()
+        coordDictCopy = self._fragmentCoordDict.deepCopy()
         copy = PuzzleFragment(
-            self.parentPuzzleParamObj,  # ok to use orig
+            self.puzzleParameters,  # ok to use orig
             pieceList=pieceListCopy,
-            edgePairs=self.edgePairs.getDeepCopy(),
+            edgePairs=self.fragEdgePairs.getDeepCopy(),
             anchorLocation=anchorLocCopy,
-            fragmentCoordDict=coordDictCopy,
+            _fragmentCoordDict=coordDictCopy,
         )
         return copy
 
@@ -776,6 +782,30 @@ class PuzzleState:
         self.edgePairs = edgePairs
         self.fragments = fragments
         self.loosePieces = loosePieces
+        self._edgePairsSyncNeeded: bool = False
+
+    def deepCopy(self) -> "PuzzleState":
+        """Return a copy of the current puzzle state.
+        The parent does not need to be copied. The fragments
+        and loose pieces themselves are OK to not make
+        fresh copies (pieces don't change and unmodified
+        fragments don't need to be duplicated), but the
+        lists containing them should be fresh ones because
+        if we, for example, remove a piece from the list of
+        loose pieces, we want that change to happen ONLY
+        in the copied state, not in the state it was copied
+        from.
+        """
+        copy = PuzzleState(
+            self.parent,
+            edgePairs=self.edgePairs.getDeepCopy(),
+            fragments=[f for f in self.fragments],
+            loosePieces=[p for p in self.loosePieces],
+        )
+        # Sync state can't be set in constructor, but should
+        # probably be passed on.
+        copy._edgePairsSyncNeeded = self._edgePairsSyncNeeded
+        return copy
 
     def addConnection(
         self, edgesToPair: Tuple[int, int], recursionCount: int = 0
@@ -814,108 +844,97 @@ class PuzzleState:
         edge2 = edgesToPair[1]
         edge1c = otherEdgesToPair[0]
         edge2c = otherEdgesToPair[1]
-        # Check whether a piece self-connects
-        if self.getPieceFromEdge(edge1) == self.getPieceFromEdge(edge2):
-            raise AddConnectionError(
-                "Candidate edge pair leads to piece self connection!"
-            )
-        if self.getPieceFromEdge(edge1c) == self.getPieceFromEdge(edge2c):
-            raise AddConnectionError(
-                "Candidate edge pair complements lead to piece self connection!"
-            )
-        # Check whether a fragment self connects
-        frag1 = self.getFragmentFromEdge(edge1)
-        if frag1 == self.getFragmentFromEdge(edge2):
-            # Both edges are on the same fragment.  This is only allowable
-            # if it works out geometrically. We can test this by checking
-            # the coordinates of each piece involved and the orientation of
-            # each edge from that piece.  If they lie on the same edge location,
-            # then this is allowable (and indeed, required), otherwise, this
-            # implies the fragment folds in some way to self connect, and is
-            # a contradiction.
-            if not self.intraFragmentConnnectionOK(frag1, edge1, edge2):
-                raise AddConnectionError(
-                    "Candidate edge pair leads to non-working fragment self connection!"
-                )
-        frag1c = self.getFragmentFromEdge(edge1c)
-        if frag1c == self.getFragmentFromEdge(edge2c):
-            if not self.intraFragmentConnnectionOK(frag1c, edge1c, edge2c):
-                raise AddConnectionError(
-                    "Candidate edge pair complements lead to non-working fragment self connection"
-                )
 
-        # Build the new puzzle state
-        newPuzzleState = self.buildNewPuzzleState(edgesToPair)
+        newPuzzleState = self.deepCopy()
+
+        newPuzzleState.joinEdges(edge1, edge2)
+        newPuzzleState.joinEdges(edge1c, edge2c)
+
         # Do geometrical checks on new puzzle state
+        while requiredEdgePairs := newPuzzleState.identifyRequiredNewEdgePairs():
+            for edgePair in requiredEdgePairs:
+                newPuzzleState.joinEdges(*edgePair)
+                # Also join implied complementary edge pair
+                newPuzzleState.joinEdges(*[-e for e in edgePair])
+            newPuzzleState.checkGeometry()
+
+        # Check if
 
         # Any additional new edge pairs required by the geometrical arrangement
         # of pieces? If so, we need to test adding them before returning
 
         return newPuzzleState
 
-    def buildNewPuzzleState(self, edgesToPair: Tuple[int, int]):
-        """Build a new puzzle state from the current puzzle state (self) and
-        a new pair connection.  It is important to make copies of any objects
-        which will be modified from state to state, because recursive calls
-        should be able to go back to the prior state without any lingering
-        effects.
+    def checkGeometry(self):
+        """Check the puzzle state for invalidity based on geometrical
+        considerations. (Piece positions, floating fragment sizes, process of
+        elimination reasoning). Geometrically required edge connections are
+        handled separately from this function.
         """
-        newEdgePairs = self.edgePairs.getDeepCopy()
-        newEdgePairs.addConnection(*edgesToPair)
-        # Build new fragment list
-        edge1, edge2 = (*edgesToPair,)
-        newFragmentList, newLoosePieces = self.joinEdges(edge1, edge2)
-
-        edge1c, edge2c = (-edge1, -edge2)
-        frag1 = self.getFragmentFromEdge()
-        self.fragments
-        newPuzzleState = PuzzleState(
-            self.parent,
-            edgePairs=newEdgePairs,
-            fragments=newFragmentList,
-            loosePieces=newLoosePieces,
-        )
-
+        anchoredFragments = [f for f in self.fragments if f.isAnchored()]
+        floatingFragments = [f for f in self.fragments if not f.isAnchored()]
+        # An Anchored fragment can have each of its pieces checked
+        # to see whether it is in its original location and orientation.  
+        # If so (unless it is at 0,0) then an error should be thrown
+        for frag in anchoredFragments:
+            for piece in frag.pieceList:
+                origRow, origCol = (*piece.origPosition,)
+                newCoord = frag.getFragCoord(piece)
+                newRow, newCol = (newCoord.rowCoord, newCoord.colCoord)
+                if (((origCol==newCol) 
+                     and (origRow==newRow) 
+                     and newCoord.rotationCount==0) 
+                    and not ((origRow,origCol)==(0,0))):
+                    raise AddConnectionError("Piece illegally placed in identical position and orientation!") 
+    
+    
     def joinEdges(
-        self, edge1, edge2, fragments=None, loosePieces=None
-    ) -> Tuple[List[PuzzleFragment], List[PuzzlePiece]]:
-        """Return new fragments and loose pieces lists after carrying out
-        a connection between the input edges
+        self,
+        edge1,
+        edge2,
+    ) -> None:
+        """Called only from a new puzzle state copy, joinEdges updates
+        the fragments and loose pieces according to the new edges to
+        join. Several types of contradictions can be detected at this
+        point, and they will lead to raising AddConnectionError
+        exceptions. The puzzle state edgePairs will be out of sync
+        after a call to joinEdges, and must be updated after all
+        joinEdges calls are made.  A boolean flag of
+        self._edgePairsSyncNeeded is set to True by calls to joinEdges
+        to mark this state.
+        Nothing is returned, rather the calling new puzzle state copy
+        is updated.
         """
-        if fragments is None:
-            fragments = self.fragments
-        if loosePieces is None:
-            loosePieces = self.loosePieces
-        frag1 = self.getFragmentFromEdge(edge1)  # none if on loose piece
+        if edge1 == edge2:
+            raise AddConnectionError("Illegal to join edge to itself!")
+        # Gather some elements used in multiple cases below
+        frag1 = self.getFragmentFromEdge(edge1)  # None if on loose piece
         frag2 = self.getFragmentFromEdge(edge2)  # None if on loose piece
-        if frag1 == frag2:
-            # On same fragment, double-check if it is OK
+        piece1 = self.getPieceFromEdge(edge1)
+        piece2 = self.getPieceFromEdge(edge2)
+
+        if piece1 == piece2:
+            raise AddConnectionError("Illegal piece self join!")
+        if (frag1 is None) and (frag2 is None):
+            # Neither edge is on an existing fragment.  Join the two
+            # loose pieces to create a new fragment
+            fragEdgePairs = FragmentEdgePairSet()
+            fragEdgePairs.addConnection(edge1, edge2)
+            newFrag = PuzzleFragment(
+                self.parent, [piece1, piece2], fragEdgePairs, anchorLocation=None
+            )
+            self.fragments.append(newFrag)
+            self.loosePieces.remove(piece1)
+            self.loosePieces.remove(piece2)
+        elif frag1 == frag2:
+            # new edges are on the same fragment, double-check if it is OK
             if not self.intraFragmentConnnectionOK(frag1, edge1, edge2):
                 raise AddConnectionError("Illegal fragment self join in joinEdges!")
             # Otherwise OK to join.  Minimal changes.  Same fragments with the same
             # piece lists, anchor location, fragment coordinate dictionary; just add one
             # edge pair
-            newFrag1 = frag1.deepCopy()
-            newFrag1.edgePairs.addConnection(edge1, edge2)
-            otherFrags = [frag.deepCopy() for frag in fragments if frag != frag1]
-            newFragments = [newFrag1].extend(otherFrags)
-            # No change in pieceList
-            newLoosePieces = list([p for p in loosePieces])
-        elif (frag1 is None) and (frag2 is None):
-            # Neither edge is on an existing fragment.  Join the two
-            # loose pieces to create a new fragment
-            piece1 = self.getPieceFromEdge(edge1)
-            piece2 = self.getPieceFromEdge(edge2)
-            newEdgePairs = self.edgePairs.getDeepCopy()
-            newEdgePairs.addConnection(edge1, edge2)
-            newFrag = PuzzleFragment(
-                self.parent, [piece1, piece2], newEdgePairs, anchorLocation=None
-            )
-            # TODO: consider whether copying fragments is really necessary or
-            # whether unmodified fragments can just be passed along
-            newFragments = [frag.deepCopy() for frag in fragments]
-            newFragments.append(newFrag)
-            newLoosePieces = list([p for p in loosePieces if p not in (piece1, piece2)])
+            frag1.fragEdgePairs.addConnection(edge1, edge2)
+            # No change in loose piece list
         elif (frag1 is not None) and (frag2 is not None):
             # The two edges are each on different fragments, we need to join the two
             # fragments into a single new fragment
@@ -927,14 +946,18 @@ class PuzzleState:
                 # edge2 is on fragment, edge1 on loose piece
                 frag = frag2.deepCopy()
                 piece = self.getPieceFromEdge(edge1)
-                otherFrags = [fragm.deepCopy() for fragm in fragments if fragm != frag2]
+                # otherFrags = [f for f in fragments if f != frag2]
             else:
                 # edge1 is on fragment, edge2 on loose piece
                 frag = frag1.deepCopy()
                 piece = self.getPieceFromEdge(edge2)
-                otherFrags = [fragm.deepCopy() for fragm in fragments if fragm != frag1]
+                # otherFrags = [fragm.deepCopy() for fragm in fragments if fragm != frag1]
             frag.pieceList.append(piece)
+            frag.fragEdgePairs.addConnection(edge1, edge2)
             frag.edgePairs
+        # The puzzle state edgePairs is now out of sync
+        self._edgePairsSyncNeeded = True
+        return
 
     def intraFragmentConnnectionOK(
         self, frag1: PuzzleFragment, edge1: int, edge2: int
@@ -1000,7 +1023,7 @@ class PuzzleState:
         """
         # The first cut is determined by the type of edge of the active edge
         activeEdgeClass = self.getEdgeClass(activeEdge)
-        candidateEdgeClasses = partnerEdgeClasses[activeEdgeClass]
+        candidateEdgeClasses = self.getComplementaryEdgeClasses(activeEdgeClass)
         candidateEdges = []
         for edgeClass in candidateEdgeClasses:
             candidateEdges.extend(self.getEdgesFromEdgeClass(edgeClass))
@@ -1017,24 +1040,32 @@ class PuzzleState:
             for edge in candidateEdges
             if self.getPieceTypeFromEdge(edge) in allowedPieceTypes
         ]
-        # Any other considerations before trying? Should the same checks
-        # be run for the implied next edge pair?  Probably a good idea
+        # Similar checks should be run for the implied next edge pair
         candidateEdgesToRemove = []
         for edge in candidateEdges:
             impliedPair = [-edge, -activeEdge]
-            edgeClass0 = self.getEdgeClass(impliedPair[0])
-            edgeClass1 = self.getEdgeClass(impliedPair[1])
+            edgeClasses = [self.getEdgeClass(e) for e in impliedPair]
+            pieceTypes = [self.getPieceFromEdge(e) for e in impliedPair]
+            allowedPieceTypes = [self.getAllowedPieceTypes(e) for e in impliedPair]
+
             # Are edge classes compatible?
-            if (edgeClass0 not in partnerEdgeClasses[edgeClass1]) or (
-                edgeClass1 not in partnerEdgeClasses[edgeClass0]
+            if (
+                edgeClasses[0] not in self.getComplementaryEdgeClasses(edgeClasses[1])
+            ) or (
+                edgeClasses[1] not in self.getComplementaryEdgeClasses(edgeClasses[0])
             ):
                 # -activeEdge is not the right edge class to connect to -edge or vice versa
                 candidateEdgesToRemove.append(edge)
             elif -edge in self.edgePairs.getFlatEdgePairList():
                 # I think this is redundant...
                 candidateEdgesToRemove.append(edge)
-            elif not allowablePieceType:
+            elif (pieceTypes[1] not in allowedPieceTypes[0]) or (
+                pieceTypes[0] not in allowedPieceTypes[1]
+            ):
+                # Implied pieces are not compatible
                 candidateEdgesToRemove.append(edge)
+        # Remove any edges disallowed by the implied pair
+        candidateEdges = [e for e in candidateEdges if e not in candidateEdgesToRemove]
 
         return tuple(candidateEdges)
 
@@ -1047,7 +1078,7 @@ class PuzzleState:
         piece = self.getPieceFromEdge(edgeNum)
         return self.parent.pieceTypeFromPiece(piece)
 
-    def getAllowedPieceTypes(self, activeEdge) -> Tuple[PieceType]:
+    def getAllowedPieceTypes(self, activeEdge: int) -> Tuple[PieceType]:
         """Based on geometrical considerations, what piece type or types could
         go in the location complementary to the active edge.  This should be
         straightforward to discern if the active edge is on an anchored
@@ -1085,7 +1116,10 @@ class PuzzleState:
             # edge of a floating fragment.
             allowedPieceTypes = (PieceType.CORNER, PieceType.BORDER, PieceType.INTERIOR)
 
-    def getFragmentFromEdge(self, edgeNum: int) -> Optional[PuzzleFragment]:
+    def getFragmentFromEdge(
+        self,
+        edgeNum: int,
+    ) -> Optional[PuzzleFragment]:
         """Find the fragment the given edge is on.  Return None if there is
         no fragment which has this edge (or maybe throw an error?)
         """
@@ -1096,16 +1130,16 @@ class PuzzleState:
         # Not in any fragment
         return None
 
-    def getEdgeClass(self, edgeNum):
+    def getEdgeClass(self, edgeNum: int) -> EdgeClass:
         return self.parent.edgeClassFromEdge[edgeNum]
 
-    def getPieceFromEdge(self, edgeNum):
+    def getPieceFromEdge(self, edgeNum: int) -> PuzzlePiece:
         return self.parent.pieceFromEdgeDict[edgeNum]
 
-    def getEdgesFromEdgeClass(self, edgeClass):
+    def getEdgesFromEdgeClass(self, edgeClass: EdgeClass) -> List[int]:
         return self.parent.edgesFromEdgeClass[edgeClass]
 
-    def getComplementaryEdgeClasses(self, edgeClass):
+    def getComplementaryEdgeClasses(self, edgeClass: EdgeClass) -> EdgeClass:
         return partnerEdgeClasses[edgeClass]
 
     def getPieceList(self) -> Tuple[PuzzlePiece]:
@@ -1210,18 +1244,17 @@ class PuzzleParameters:
         )
         # startingCornerPiece.newPosition = [0, 0]
         # startingCornerPiece.newOrientation = 0
-        edgePairs = EdgePairSet()
+        fragEdgePairs = FragmentEdgePairSet()
         startingFragment = PuzzleFragment(
-            parentPuzzleParamObj=self,
+            puzzleParameters=self,
             pieceList=[startingCornerPiece],
-            edgePairs=edgePairs,
+            fragEdgePairs=fragEdgePairs,
             anchorLocation=fragmentAnchor,
         )
         #
         initPuzzleState = PuzzleState(
-            self.nRows,
-            self.nCols,
-            edgePairs=edgePairs,
+            parent=self,
+            edgePairs=EdgePairSet(),
             fragments=[startingFragment],
             loosePieces=pieceList[1:],
         )
