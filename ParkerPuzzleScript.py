@@ -360,12 +360,10 @@ class PuzzleFragment:
         if self._cachedFreeEdgesList is None:
             self.updateCachedFreeEdgesList()
 
-    def getFragCoord(
-        self, piece: PuzzlePiece
-    ) ->FragmentCoordinate:
+    def getFragCoord(self, piece: PuzzlePiece) -> FragmentCoordinate:
         return self._fragmentCoordDict[piece]
-    
-    def setFragCoord(self, piece:PuzzlePiece, fragCoord:FragmentCoordinate):
+
+    def setFragCoord(self, piece: PuzzlePiece, fragCoord: FragmentCoordinate):
         self._fragmentCoordDict[piece] = fragCoord
 
     def assignFragmentCoordinates(self):
@@ -375,7 +373,7 @@ class PuzzleFragment:
         coordinates assigned.
         """
         startingPiece = self.pieceList[0]
-        self.setFragCoord(startingPiece) = FragmentCoordinate(0, 0, 0)
+        self.setFragCoord(startingPiece, FragmentCoordinate(0, 0, 0))
         piecesToCheckNext = set([startingPiece])
         # N, E, S, W = ((-1, 0), (0, 1), (1, 0), (0, -1))
         # offsets = (N, E, S, W)
@@ -419,7 +417,7 @@ class PuzzleFragment:
                                 )
                         except KeyError:
                             # No current fragment coordinate, assign it
-                            self.getFragCoord(partnerPiece) = partnerCoord
+                            self.setFragCoord(partnerPiece, partnerCoord)
                             # Add piece to the set of pieces to check the edges of next
                             piecesToCheckNext.add(partnerPiece)
                 # Finished looping over current list of pieces to check
@@ -464,7 +462,7 @@ class PuzzleFragment:
                     rotatedRotationCount,
                 )
                 # Replace with updated coordinate (should we update the existing one instead of making a new one?)
-                self.getFragCoord(piece) = newFragCoord
+                self.setFragCoord(piece, newFragCoord)
 
     def checkAllFragmentCoordinatesAssigned(self):
         """Return True if all pieces have fragment coordinates
@@ -478,7 +476,6 @@ class PuzzleFragment:
             return False
         # We made it, all pieces were keys
         return True
-
 
     def getFreeEdgesList(self):
         if self._cachedFreeEdgesList is None:
@@ -583,9 +580,11 @@ class PuzzleFragment:
         open.  If open, add it to the list and check the next clockwise edge
         """
         # The search pattern is different for finding the first edge
-        firstFreeEdgeNum, firstFreeEdgePiece, mostRecentEdgeDirection = (
-            self.findFirstFreeEdge(startingPiece=self.pieceList[0])
-        )
+        (
+            firstFreeEdgeNum,
+            firstFreeEdgePiece,
+            mostRecentEdgeDirection,
+        ) = self.findFirstFreeEdge(startingPiece=self.pieceList[0])
         # Start the list of external edges
         externalEdgeList = [(firstFreeEdgeNum, firstFreeEdgePiece)]
         # Need edge number AND piece because 0 edge numbers are not unique mappings
@@ -874,20 +873,22 @@ class PuzzleState:
         anchoredFragments = [f for f in self.fragments if f.isAnchored()]
         floatingFragments = [f for f in self.fragments if not f.isAnchored()]
         # An Anchored fragment can have each of its pieces checked
-        # to see whether it is in its original location and orientation.  
+        # to see whether it is in its original location and orientation.
         # If so (unless it is at 0,0) then an error should be thrown
         for frag in anchoredFragments:
             for piece in frag.pieceList:
                 origRow, origCol = (*piece.origPosition,)
                 newCoord = frag.getFragCoord(piece)
                 newRow, newCol = (newCoord.rowCoord, newCoord.colCoord)
-                if (((origCol==newCol) 
-                     and (origRow==newRow) 
-                     and newCoord.rotationCount==0) 
-                    and not ((origRow,origCol)==(0,0))):
-                    raise AddConnectionError("Piece illegally placed in identical position and orientation!") 
-    
-    
+                if (
+                    (origCol == newCol)
+                    and (origRow == newRow)
+                    and newCoord.rotationCount == 0
+                ) and not ((origRow, origCol) == (0, 0)):
+                    raise AddConnectionError(
+                        "Piece illegally placed in identical position and orientation!"
+                    )
+
     def joinEdges(
         self,
         edge1,
