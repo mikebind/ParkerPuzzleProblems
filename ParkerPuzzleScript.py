@@ -372,6 +372,45 @@ def getOriginalCorner(piece: "PuzzlePiece") -> "GridCorner":
     return gc
 
 
+def findRequiredEdgePairs(puzzMapObj: "PuzzleMap"):
+    """Return the list of required edge pairs given a puzzle map object
+    (anchored or floating). This is purely geometric. If two pieces are
+    adjacent in the map, then their shared side must be paired.
+    """
+    requiredEdgePairs = []
+    # We should be able to do this in a vectorized way by working with
+    # a boolean numpy array to identify N,S,E,W neighbors by shifting
+    # array and overlapping.
+    bmap = puzzMapObj.getBoolMap()
+    # North-South overlaps
+    hasSouthNeigbor = np.argwhere(np.logical_and(bmap[:-1, :], bmap[1:, :]))
+    for row, col in hasSouthNeigbor:
+        # Find south side of the piece at r,c
+        northPiece = puzzMapObj.pieceMap[row, col]
+        rot = puzzMapObj.rotationMap[row, col]
+        # Get the current south side edge of the north piece
+        edge1 = northPiece.getCWEdges(rot)[2]
+        # Get the current north side edge of the south piece
+        southPiece = puzzMapObj.pieceMap[row + 1, col]
+        rot = puzzMapObj.rotationMap[row + 1, col]
+        edge2 = southPiece.getCWEdges(rot)[0]
+        requiredEdgePairs.append((edge1, edge2))
+    # East-West overlaps
+    hasEastNeighbor = np.argwhere(np.logical_and(bmap[:, :-1], bmap[:, 1:]))
+    for row, col in hasEastNeighbor:
+        # Find south side of the piece at r,c
+        westPiece = puzzMapObj.pieceMap[row, col]
+        rot = puzzMapObj.rotationMap[row, col]
+        # Get the current south side edge of the north piece
+        edge1 = westPiece.getCWEdges(rot)[1]
+        # Get the current north side edge of the south piece
+        eastPiece = puzzMapObj.pieceMap[row, col + 1]
+        rot = puzzMapObj.rotationMap[row, col + 1]
+        edge2 = southPiece.getCWEdges(rot)[3]
+        requiredEdgePairs.append((edge1, edge2))
+    return requiredEdgePairs
+
+
 # MARK: PuzzleFragment
 class PuzzleFragment:
     """A representation of more than one puzzle piece, either with a fixed location (anchored),
@@ -383,6 +422,10 @@ class PuzzleFragment:
     A puzzle fragment can be defined by the set of pieces included, and by the set of connections
     linking them.
     """
+
+    puzzleParameters: "PuzzleParameters"
+    pieceList: List[PuzzlePiece]
+    fragEdgePairs: FragmentEdgePairSet
 
     def __init__(
         self,
@@ -398,7 +441,7 @@ class PuzzleFragment:
         self.puzzleParameters = puzzleParameters
         self.anchorLocation = anchorLocation
         self.pieceList = pieceList
-        self.fragEdgePairs = fragEdgePairs
+        self.fragEdgePairs = fragEdgePairs if fragEdgePairs else FragmentEdgePairSet()
         # ^^ Should we verify this is valid?? ^^
         if _fragmentCoordDict is None:
             self._fragmentCoordDict = FragmentCoordDict()
@@ -1153,6 +1196,15 @@ class PuzzleState:
         specified. All anchored fragments can share one map. Each floating fragment
         will need its own map and its own coordinate system.
         """
+        anchoredFragments = [f for f in self.fragments if f.isAnchored()]
+        floatingFragments = [f for f in self.fragments if not f.isAnchored()]
+        # Anchored fragments have a common puzzle map
+        anchPuzzleMap = AnchoredPuzzleMap(self.getPuzzleSize(), anchoredFragments)
+        reqEdgePairs = findRequiredEdgePairs(anchPuzzleMap)
+        # Floating fragments are dealt with individually
+        for fragment in floatingFragments:
+            fragReqEdgePairs = findRequiredEdgePairs(fragment.puzzMap)
+
         # TODO: Working here
         # TODO: perhaps consider that local fragment coordinate systems should
         # maybe be forced to be non-negative (i.e. if adding a new piece and
@@ -1383,7 +1435,7 @@ class PuzzleState:
 
     def getPuzzleMapMaxOpenDim(self, puzzleMap: np.ndarray) -> int:
         """Get the maximum open dimension left in the puzzle. For now, this will be
-        very simple minded, but it could be made more sophistcated over time.
+        very simple minded, but it (TODO) could be made more sophistcated over time.
         """
         # Currently just sum of open spaces in each column or row
         maxHeight = np.max(np.sum(puzzleMap, axis=0))
