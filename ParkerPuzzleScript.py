@@ -55,7 +55,7 @@ class EdgePairSet:
         edge2c = -edge2
         return edge2c, edge1c
 
-    def getFlatEdgePairList(self) -> Tuple[int]:
+    def getFlatEdgeList(self) -> Tuple[int]:
         """Get a flattened list (tuple) of the edge
         numbers involved in all pairs
         """
@@ -90,7 +90,7 @@ class FragmentEdgePairSet:
         except KeyError:
             return None
 
-    def getFlatEdgePairList(self) -> Tuple[int]:
+    def getFlatEdgeList(self) -> Tuple[int]:
         """Get a flattened list (tuple) of the edge
         numbers involved in all pairs
         """
@@ -301,7 +301,7 @@ def calcFragEdgePairs(
     """Filter the edge pairs (from a puzzle state) to include only those
     edges present in the pieces in the piece list.
     """
-    statePairedEdges = edgePairs.getFlatEdgePairList()
+    statePairedEdges = edgePairs.getFlatEdgeList()
     # Loop over all piece edges and keep those which are in the supplied edgePairs
     edgesToInclude = [
         e for piece in pieceList for e in piece.getEdgeNums() if e in statePairedEdges
@@ -426,6 +426,10 @@ class PuzzleFragment:
     puzzleParameters: "PuzzleParameters"
     pieceList: List[PuzzlePiece]
     fragEdgePairs: FragmentEdgePairSet
+    anchorLocation: Optional[AnchorLocation]
+    puzzleMap: "PuzzleMap"
+    _fragmentCoordDict: FragmentCoordDict
+    _cachedFreeEdgesList: Optional[Tuple[int]]
 
     def __init__(
         self,
@@ -436,6 +440,7 @@ class PuzzleFragment:
         _fragmentCoordDict: Optional[
             FragmentCoordDict[PuzzlePiece, FragmentCoordinate]
         ] = None,
+        puzzleMap: Optional["PuzzleMap"] = None,
         _cachedFreeEdgesList: Optional[Tuple[int]] = None,
     ):
         self.puzzleParameters = puzzleParameters
@@ -449,9 +454,28 @@ class PuzzleFragment:
         else:
             # TODO: Validate this is OK first?
             self._fragmentCoordDict = _fragmentCoordDict
+        # Bulding a puzzleMap depends on the fragmentCoordDict, so
+        # this needs to happen after assignFragmentCoordinates()
+        puzzleSize = self.getPuzzleSize()
+        if puzzleMap is None:
+            if self.isAnchored():
+                # Note that, while anchored, this map does not contain
+                # the pieces from any other anchored fragment
+                puzzleMap = AnchoredPuzzleMap(puzzleSize, [self])
+            else:
+                # Floating fragment
+                puzzleMap = FloatingPuzzleMap(puzzleSize, self)
+        self.puzzleMap = puzzleMap
+        # _cachedFreeEdgesList update depends on fragEdgePairs and
+        # pieceList being filled in already
         self._cachedFreeEdgesList = _cachedFreeEdgesList
         if self._cachedFreeEdgesList is None:
             self.updateCachedFreeEdgesList()
+
+    def getPuzzleSize(self):
+        nRows = self.puzzleParameters.nRows
+        nCols = self.puzzleParameters.nCols
+        return nRows, nCols
 
     def getFragCoord(self, piece: PuzzlePiece) -> FragmentCoordinate:
         return self._fragmentCoordDict[piece]
@@ -676,7 +700,7 @@ class PuzzleFragment:
         """Free edges are those which are on pieces in this fragment,
         but which are not in the list of edgePairs
         """
-        flatPairedEdgeList = self.fragEdgePairs.getFlatEdgePairList()
+        flatPairedEdgeList = self.fragEdgePairs.getFlatEdgeList()
         flatFragmentEdgeSet = set()
         for piece in self.pieceList:
             for edgeNum in piece.getEdgeNums():
@@ -867,12 +891,14 @@ class PuzzleFragment:
         pieceListCopy = [*self.pieceList]
         anchorLocCopy = self.anchorLocation.deepCopy() if self.anchorLocation else None
         coordDictCopy = self._fragmentCoordDict.deepCopy()
+        puzzMapCopy = self.puzzleMap.deepCopy()
         copy = PuzzleFragment(
             self.puzzleParameters,  # ok to use orig
             pieceList=pieceListCopy,
             edgePairs=self.fragEdgePairs.getDeepCopy(),
             anchorLocation=anchorLocCopy,
             _fragmentCoordDict=coordDictCopy,
+            puzzleMap=puzzMapCopy,
         )
         return copy
 
@@ -995,11 +1021,42 @@ class PuzzleMap:
     def getCoordFromPiece(self, piece: PuzzlePiece) -> FragmentCoordinate:
         return self._coordFromPiece[piece]
 
+    def deepCopy(self) -> "PuzzleMap":
+        """Reimplement in child classes"""
+        pass
+
+    def addCommonAttr(self, copy: "PuzzleMap"):
+        """Add the common attributes to the given copy. (this is called
+        by the children classes deepCopy). I couldn't figure out how
+        to implement this in the parent deepCopy() method, because
+        I think the copy would have ended up with class PuzzleMap
+        instead of AnchoredPuzzleMap or FloatingPuzzleMap."""
+        copy.pieceMap = self.pieceMap.copy()
+        copy.rotationMap = self.rotationMap.copy()
+        copy.puzzleSize = self.puzzleSize()  # no need to copy a tuple of integers
+        copy._coordFromPiece = self._coordFromPiece.copy()
+
 
 class AnchoredPuzzleMap(PuzzleMap):
-    def __init__(self, puzzleSize, fragments):
+    def __init__(
+        self,
+        puzzleSize,
+        fragments: Optional[List[PuzzleFragment]],
+        pieceMap: Optional[np.ndarray],
+        rotationMap: Optional[np.ndarray],
+        _coordFromPiece: Optional[Dict],
+    ):
         super().__init__(puzzleSize)
-        self.buildMaps(fragments)
+        if not (pieceMap and rotationMap and _coordFromPiece):
+            # If any of these are None, build from fragments
+            if fragments is None:
+                raise ValueError(
+                    "Fragments was None when maps needed to be built from them in AnchoredPuzzleMap!"
+                )
+            pieceMap, rotationMap, _coordFromPiece = self.buildMaps(fragments)
+        self.pieceMap = pieceMap
+        self.rotationMap = rotationMap
+        self._coordFromPiece = _coordFromPiece
 
     def buildMaps(self, anchoredFragments: List[PuzzleFragment]):
         """Build the piece map, rotation map, and _coordFromPiece dict
@@ -1009,6 +1066,7 @@ class AnchoredPuzzleMap(PuzzleMap):
         """
         pieceMap = np.full(self.puzzleSize, None, dtype=object)
         rotationMap = np.full_like(pieceMap, dtype=int)
+        coordFromPieceDict = dict()
         # like puzzleGridArray in checkGeometry!  add code from there
         for frag in anchoredFragments:
             for piece in frag.pieceList:
@@ -1019,22 +1077,50 @@ class AnchoredPuzzleMap(PuzzleMap):
                 pieceMap[row, col] = piece
                 rotationMap[row, col] = rot
                 # Store lookup in dict
-                self._coordFromPiece[piece, fragCoord]
-        self.pieceMap = pieceMap
-        self.rotationMap = rotationMap
+                coordFromPieceDict[piece, fragCoord]
+
+        return pieceMap, rotationMap, coordFromPieceDict
 
     def isAnchored(self):
         return True
 
+    def deepCopy(self) -> "AnchoredPuzzleMap":
+        """Make a deep copy"""
+        copy = AnchoredPuzzleMap(
+            self.puzzleSize,
+            pieceMap=self.pieceMap.copy(),
+            rotationMap=self.rotationMap.copy(),
+            _coordFromPiece=self._coordFromPiece.copy(),
+        )
+        return copy
+
 
 class FloatingPuzzleMap(PuzzleMap):
-    def __init__(self, puzzleSize: Tuple[int, int], fragment: PuzzleFragment):
+    def __init__(
+        self,
+        puzzleSize: Tuple[int, int],
+        fragment: Optional[PuzzleFragment] = None,
+        pieceMap: Optional[np.ndarray] = None,
+        rotationMap: Optional[np.ndarray] = None,
+        _coordFromPiece: Optional[Dict[PuzzlePiece, FragmentCoordinate]] = None,
+    ):
         super().__init__(puzzleSize)
-        self.buildMaps(fragment)
-        pass
+        if not (pieceMap and rotationMap and _coordFromPiece):
+            # If any of these are None, build from fragment
+            if fragment is None:
+                raise ValueError(
+                    "Fragment was None when maps needed to be built from it in FloatingPuzzleMap!"
+                )
+            pieceMap, rotationMap, _coordFromPiece = self.buildMaps(fragment)
+        self.pieceMap = pieceMap
+        self.rotationMap = rotationMap
+        self._coordFromPiece = _coordFromPiece
 
-    def buildMaps(self, fragment: PuzzleFragment):
-        """Build the piece map, rotation map, and _coordFromPiece dict"""
+    def buildMaps(
+        self, fragment: PuzzleFragment
+    ) -> Tuple[np.ndarray, np.ndarray, Dict[PuzzlePiece, FragmentCoordinate]]:
+        """Build the piece map, rotation map, and coordFromPiece dict"""
+        coordFromPiece = dict()
         # First, figure out what size the maps need to be for this floating
         # fragment.
         maxAssignedRow = 0
@@ -1074,12 +1160,21 @@ class FloatingPuzzleMap(PuzzleMap):
             pieceMap[fc.rowCoord, fc.colCoord] = piece
             rotationMap[fc.rowCoord, fc.colCoord] = fc.rotationCount
             # Store coordinate lookup in dict
-            self._coordFromPiece[piece, fc]
-        self.pieceMap = pieceMap
-        self.rotationMap = rotationMap
+            coordFromPiece[piece, fc]
+        return pieceMap, rotationMap, coordFromPiece
 
     def isAnchored(self):
         return False
+
+    def deepCopy(self):
+        """Make a deep copy"""
+        copy = FloatingPuzzleMap(
+            self.puzzleSize,
+            pieceMap=self.pieceMap.copy(),
+            rotationMap=self.rotationMap.copy(),
+            _coordFromPiece=self._coordFromPiece.copy(),
+        )
+        return copy
 
 
 # MARK: PuzzleState
@@ -1157,16 +1252,12 @@ class PuzzleState:
         the current puzzle state, then we must enforce adding that edgePair connection
         as well (probably by recursively calling this function with a new state).
         """
-        otherEdgesToPair = tuple(-e for e in edgesToPair)
         edge1 = edgesToPair[0]
         edge2 = edgesToPair[1]
-        edge1c = otherEdgesToPair[0]
-        edge2c = otherEdgesToPair[1]
 
         newPuzzleState = self.deepCopy()
 
-        newPuzzleState.joinEdges(edge1, edge2)
-        newPuzzleState.joinEdges(edge1c, edge2c)
+        newPuzzleState.joinEdgesAndCompEdges(edge1, edge2)
 
         # Do geometrical checks on new puzzle state
         newPuzzleState.findAndAssignNewAnchors()
@@ -1174,9 +1265,7 @@ class PuzzleState:
 
         while requiredNewEdgePairs:
             for edgePair in requiredNewEdgePairs:
-                newPuzzleState.joinEdges(*edgePair)
-                # Also join implied complementary edge pair
-                newPuzzleState.joinEdges(*[-e for e in edgePair])
+                newPuzzleState.joinEdgesAndCompEdges(*edgePair)
             newPuzzleState.findAndAssignNewAnchors()
             newPuzzleState.checkGeometry()  # TODO: consider, here or after while?
             requiredNewEdgePairs = newPuzzleState.identifyRequiredNewEdgePairs()
@@ -1188,7 +1277,17 @@ class PuzzleState:
 
         return newPuzzleState
 
-    def identifyRequiredNewEdgePairs(self):
+    def joinEdgesAndCompEdges(self, edge1: int, edge2: int):
+        """Join given edges, their complementary edge pair, and update
+        the edgePairSet. This method bundles the joinEdges() calls so that
+        the edgePairs is kept in sync and does not remain unsynced for long.
+        """
+        self.joinEdges(edge1, edge2)
+        self.joinEdges(-edge1, -edge2)
+        self.edgePairs.addConnection(edge1, edge2)
+        self._edgePairsSyncNeeded = False
+
+    def identifyRequiredNewEdgePairs(self) -> Tuple[Tuple[int, int]]:
         """Placed pieces may geometrically entail other connections. This function
         is supposed to determine those. The basic approach will be to make
         puzzle grid maps and make a list of all required edges, and compare with
@@ -1204,19 +1303,29 @@ class PuzzleState:
         # Floating fragments are dealt with individually
         for fragment in floatingFragments:
             fragReqEdgePairs = findRequiredEdgePairs(fragment.puzzMap)
+            reqEdgePairs.extend(fragReqEdgePairs)
+        # Now, we can make a new list containing only the required edge pairs which are
+        # not already in the EdgePairSet we have
+        newReqEdgePairs = []
+        for e1, e2 in reqEdgePairs:
+            if self.edgePairs[e1] is None and self.edgePairs[e2] is None:
+                # Neither edge is in the current EdgePairSet, this is a new required pairing!
+                newReqEdgePairs.append((e1, e2))
+            elif self.edgePairs[e1] != e2:
+                # At least one of e1 and e1 is in the set, but not paired with the other
+                raise AddConnectionError(
+                    "Geometrically required edge pairing does not match existing pairing in EdgePairSet!"
+                )
+        # Return the new edge pairs we need to add
+        return newReqEdgePairs
 
-        # TODO: Working here
-        # TODO: perhaps consider that local fragment coordinate systems should
-        # maybe be forced to be non-negative (i.e. if adding a new piece and
-        # it would have a negative coord, then shift the local coordinates of all
-        # pieces in the fragment?  This can be done at the fragCoordDict level...)
-        # TODO: also remember that perhaps new fragment copies need to be made
-        # whenever a fragment is created or modified?? Or is that no longer the
-        # case because we are always working with the new puzzle state and its
-        # consequences?? If exceptions are always only caught at the solvePuzzle
-        # level, and they always lead to trying another new edge pair, that triggers
-        # a new test PuzzleState, so we don't need to worry about later modifications
-        # if we make a copy at that point.
+    # TODO: also remember that perhaps new fragment copies need to be made
+    # whenever a fragment is created or modified?? Or is that no longer the
+    # case because we are always working with the new puzzle state and its
+    # consequences?? If exceptions are always only caught at the solvePuzzle
+    # level, and they always lead to trying another new edge pair, that triggers
+    # a new test PuzzleState, so we don't need to worry about later modifications
+    # if we make a copy at that point.
 
     def findAndAssignNewAnchors(self):
         """This function tries to anchor floating fragments by process of
@@ -1459,6 +1568,11 @@ class PuzzleState:
         to mark this state.
         Nothing is returned, rather the calling new puzzle state copy
         is updated.
+        We do not update the puzzleState edgePairs within this function
+        because the one call to joinEdges before a call for the
+        implied complementary pair cannot be consistently represented
+        in an EdgePairSet. Only after both pair joins have been completed
+        can we update the EdgePairSet.
         """
         if edge1 == edge2:
             raise AddConnectionError("Illegal to join edge to itself!")
@@ -1509,7 +1623,7 @@ class PuzzleState:
                 # otherFrags = [fragm.deepCopy() for fragm in fragments if fragm != frag1]
             frag.pieceList.append(piece)
             frag.fragEdgePairs.addConnection(edge1, edge2)
-            frag.edgePairs
+
         # The puzzle state edgePairs is now out of sync
         self._edgePairsSyncNeeded = True
         return
@@ -1583,7 +1697,7 @@ class PuzzleState:
         for edgeClass in candidateEdgeClasses:
             candidateEdges.extend(self.getEdgesFromEdgeClass(edgeClass))
         # Remove any edges which are already paired
-        alreadyPairedEdges = self.edgePairs.getFlatEdgePairList()
+        alreadyPairedEdges = self.edgePairs.getFlatEdgeList()
         candidateEdges = [
             edge for edge in candidateEdges if edge not in alreadyPairedEdges
         ]
@@ -1611,7 +1725,7 @@ class PuzzleState:
             ):
                 # -activeEdge is not the right edge class to connect to -edge or vice versa
                 candidateEdgesToRemove.append(edge)
-            elif -edge in self.edgePairs.getFlatEdgePairList():
+            elif -edge in self.edgePairs.getFlatEdgeList():
                 # I think this is redundant...
                 candidateEdgesToRemove.append(edge)
             elif (pieceTypes[1] not in allowedPieceTypes[0]) or (
@@ -1908,7 +2022,7 @@ def solve(puzzState: PuzzleState) -> PuzzleState:
     candidateEdges = puzzState.findCandidateEdges(activeEdge)
     for candidateEdge in candidateEdges:
         try:
-            nextState = puzzState.addConnection(candidateEdge)
+            nextState = puzzState.addConnection((activeEdge, candidateEdge))
             if nextState.isComplete():
                 solvedPuzzle = nextState
                 return solvedPuzzle
