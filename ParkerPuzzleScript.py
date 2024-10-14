@@ -72,6 +72,11 @@ class EdgePairSet:
 class FragmentEdgePairSet:
     _lookup: Dict[int, int]
 
+    def __init__(self, lookupDict: Optional[Dict[int, int]] = None):
+        if lookupDict is None:
+            lookupDict = dict()
+        self._lookup = lookupDict
+
     def addConnection(self, edge1: int, edge2: int):
         if edge1 == edge2:
             raise EdgePairError("Not allowed to pair and edge with itself")
@@ -180,7 +185,7 @@ class FragmentCoordinate(NamedTuple):
 
 
 class FragmentCoordDict(dict):
-    def deepCopy(self) -> "FragmentCoordDict"["PuzzlePiece", FragmentCoordinate]:
+    def deepCopy(self):  # -> "FragmentCoordDict"["PuzzlePiece", FragmentCoordinate]:
         return {key: val.deepCopy() for key, val in self.items()}
 
 
@@ -193,8 +198,8 @@ class PuzzlePiece:
         signedEdgeNums: Tuple[int, int, int, int],
     ):
         self.origPosition = (origRow, origCol)
-        self.pieceType = self.getPieceType()
         self._signedEdgeNums = signedEdgeNums
+        self.pieceType = self.getPieceType()
 
     def getEdgeNums(self):
         return self._signedEdgeNums  # tuple(edge.edgeNum for edge in self.edges)
@@ -226,7 +231,7 @@ class PuzzlePiece:
             )
         return pieceType
 
-    def getEdgeClasses(self):
+    def getEdgeClasses(self) -> Tuple[EdgeClass]:
         """Return a tuple of the edge class associated with each edge"""
         edgeNums = self.getEdgeNums()
         pieceType = self.pieceType
@@ -237,7 +242,7 @@ class PuzzlePiece:
             else:
                 # Edge number is nonzero
                 if pieceType == PieceType.INTERIOR:
-                    edgeClasses.append(EdgeClass.INTERIOR)
+                    edgeClass = EdgeClass.INTERIOR
                 else:
                     # This piece has an outer border, the edge class
                     # depends on where this edge stands relative to
@@ -260,9 +265,8 @@ class PuzzlePiece:
                         )
                     else:
                         assert (
-                            pieceType == PieceType.BORDER,
-                            "To get here, the piece type should only ever be a border edge piece!",
-                        )
+                            pieceType == PieceType.BORDER
+                        ), "To get here, the piece type should only ever be a border edge piece!"
                         edgeClass = EdgeClass.INTERIOR
             # Store edge class
             edgeClasses.append(edgeClass)
@@ -614,8 +618,11 @@ class PuzzleFragment:
             for piece in set(self.pieceList):
                 fc = self.getFragCoord(piece)
                 # update with new values
-                fc.rowCoord = fc.rowCoord + rowOffset
-                fc.colCoord = fc.colCoord + colOffset
+                newRow = fc.rowCoord + rowOffset
+                newCol = fc.colCoord + colOffset
+                newRot = fc.rotationCount
+                newFc = FragmentCoordinate(newRow, newCol, newRot)
+                self.setFragCoord(piece, newFc)
 
     def checkAllFragmentCoordinatesAssigned(self):
         """Return True if all pieces have fragment coordinates
@@ -712,7 +719,7 @@ class PuzzleFragment:
             for edgeNum in flatFragmentEdgeSet
             if edgeNum not in flatPairedEdgeList
         )
-        self._cachedFreeEdgesList = freeEdges
+        self._cachedFreeEdgesList = tuple(freeEdges)
 
     def findFirstFreeEdge(
         self, startingPiece: Optional[PuzzlePiece] = None, searchDirection: int = 0
@@ -819,7 +826,7 @@ class PuzzleFragment:
                 # Edge not free, move to the connected piece in the search
                 # direction
                 partnerEdge = self.fragEdgePairs[edgeNumToCheck]
-                partnerPiece = self.parentPuzzleState.getPieceFromEdge(partnerEdge)
+                partnerPiece = self.puzzleParameters.getPieceFromEdge(partnerEdge)
                 currentPiece = partnerPiece
                 # Update the search direction ccw one step
                 searchDirection = (searchDirection - 1) % 4
@@ -885,7 +892,7 @@ class PuzzleFragment:
 
     def isAnchored(self) -> bool:
         """Check whether the fragment is anchored or not"""
-        return self.anchorLocation is None
+        return not (self.anchorLocation is None)
 
     def deepCopy(self) -> "PuzzleFragment":
         pieceListCopy = [*self.pieceList]
@@ -1041,10 +1048,10 @@ class AnchoredPuzzleMap(PuzzleMap):
     def __init__(
         self,
         puzzleSize,
-        fragments: Optional[List[PuzzleFragment]],
-        pieceMap: Optional[np.ndarray],
-        rotationMap: Optional[np.ndarray],
-        _coordFromPiece: Optional[Dict],
+        fragments: Optional[List[PuzzleFragment]] = None,
+        pieceMap: Optional[np.ndarray] = None,
+        rotationMap: Optional[np.ndarray] = None,
+        _coordFromPiece: Optional[Dict] = None,
     ):
         super().__init__(puzzleSize)
         if not (pieceMap and rotationMap and _coordFromPiece):
@@ -1065,7 +1072,7 @@ class AnchoredPuzzleMap(PuzzleMap):
         checkGeometry(), where the consistency checks are the point...
         """
         pieceMap = np.full(self.puzzleSize, None, dtype=object)
-        rotationMap = np.full_like(pieceMap, dtype=int)
+        rotationMap = np.full_like(pieceMap, 0, dtype=int)
         coordFromPieceDict = dict()
         # like puzzleGridArray in checkGeometry!  add code from there
         for frag in anchoredFragments:
@@ -1077,7 +1084,7 @@ class AnchoredPuzzleMap(PuzzleMap):
                 pieceMap[row, col] = piece
                 rotationMap[row, col] = rot
                 # Store lookup in dict
-                coordFromPieceDict[piece, fragCoord]
+                coordFromPieceDict[piece] = fragCoord
 
         return pieceMap, rotationMap, coordFromPieceDict
 
@@ -1160,7 +1167,7 @@ class FloatingPuzzleMap(PuzzleMap):
             pieceMap[fc.rowCoord, fc.colCoord] = piece
             rotationMap[fc.rowCoord, fc.colCoord] = fc.rotationCount
             # Store coordinate lookup in dict
-            coordFromPiece[piece, fc]
+            coordFromPiece[piece] = fc
         return pieceMap, rotationMap, coordFromPiece
 
     def isAnchored(self):
@@ -1898,7 +1905,7 @@ class PuzzleParameters:
                     Ep = 0
                 polarities = (Np, Ep, Sp, Wp)
                 edgeTypes = (N, E, S, W)
-                signedEdgeTypes = (e * p for e, p in zip(edgeTypes, polarities))
+                signedEdgeTypes = tuple((e * p for e, p in zip(edgeTypes, polarities)))
 
                 # Generate the pieces
                 piece = PuzzlePiece(rIdx, cIdx, signedEdgeTypes)
@@ -1981,6 +1988,9 @@ class PuzzleParameters:
             edgeClassFromEdge,
         )
 
+    def getPieceFromEdge(self, edgeNum: int) -> PuzzlePiece:
+        return self.pieceFromEdgeDict[edgeNum]
+
 
 # Consider, do we want to categorize the edges on construction (outer, rim_cw, rim_ccw, internal)
 # and put into dict? Or an Edge object class?
@@ -1993,25 +2003,6 @@ class PuzzleParameters:
 # Right Col edge pieces North edge
 # Bottom Row edge pieces East edge
 # Left Col edge pieces South edge
-
-
-def main():
-    nRows = 5
-    nCols = 5
-    puzzGen = PuzzleParameters(nRows, nCols)
-    initialPuzzState = puzzGen.initPuzzleState
-    pieceList = initialPuzzState.getPieceList()
-    for piece in pieceList:
-        # print(piece)
-        print(f"{piece.origPosition}: {piece.getSignedEdges()}")
-    # Try to solve it!
-    try:
-        solvedPuzzle = solve(initialPuzzState)
-    except OutOfEdgesError as e:
-        print("Impossible, no solution found!")
-        return
-    print("Found final solution!!  Figure out a way to print it!")
-    solvedPuzzle.show()
 
 
 listOfErrors = []
@@ -2083,6 +2074,25 @@ class ActiveEdgeNotOnFragmentError(Exception):
 
 class ZeroEdgeNumberNotUniqueError(Exception):
     pass
+
+
+def main():
+    nRows = 5
+    nCols = 5
+    puzzGen = PuzzleParameters(nRows, nCols)
+    initialPuzzState = puzzGen.initPuzzleState
+    pieceList = initialPuzzState.getPieceList()
+    for piece in pieceList:
+        # print(piece)
+        print(f"{piece.origPosition}: {piece.getEdgeNums()}")
+    # Try to solve it!
+    try:
+        solvedPuzzle = solve(initialPuzzState)
+    except OutOfEdgesError as e:
+        print("Impossible, no solution found!")
+        return
+    print("Found final solution!!  Figure out a way to print it!")
+    solvedPuzzle.show()
 
 
 if __name__ == "__main__":
