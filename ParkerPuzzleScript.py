@@ -910,6 +910,12 @@ class PuzzleFragment:
         as the most recent external edge.  Either there is a piece there or it is
         open.  If open, add it to the list and check the next clockwise edge
         """
+        boolMap = self.puzzleMap.getBoolMap()
+        pieceMap = self.puzzleMap.pieceMap
+        rotationMap = self.puzzleMap.rotationMap
+
+        # Rewrite firstFreeEdgeNum to use pieceMap?
+
         # The search pattern is different for finding the first edge
         (
             firstFreeEdgeNum,
@@ -928,6 +934,14 @@ class PuzzleFragment:
             # nextFreeEdge, mostRecentEdgeDirection, nextPiece = self.findNextFreeEdge(currentPiece, mostRecentEdgeDirection)
             edgeNumToCheck = currentPiece.getEdgeNums()[searchDirection]
             if self.checkEdgeFree(edgeNumToCheck):
+                if (edgeNumToCheck, currentPiece) in externalEdgeList[1:]:
+                    raise ValueError(
+                        "Algorithm error, repeating an edge/piece combination"
+                    )
+                    # actually, this can happen on a corner piece, with two zero edges (both
+                    # of which will results in (0, piece) entries.  We could add the edgeclass
+                    # as a distinguisher, but I wonder if it is better to just use the puzzleMap
+                    # now that we have developed that. )
                 # Edge is free, add it to the list
                 externalEdgeList.append((edgeNumToCheck, currentPiece))
                 # Keep current piece, update most recent edge direction
