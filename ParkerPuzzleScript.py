@@ -1,6 +1,6 @@
 # For exploring Parker Alternative Puzzles
 # import typing
-from typing import Tuple, Optional, List, Dict, NamedTuple, Set
+from typing import Tuple, Optional, List, Dict, NamedTuple, Set, Iterable
 import numpy as np
 from enum import Enum
 
@@ -568,6 +568,17 @@ class PuzzleFragment:
     def getPieceFromEdge(self, edgeNum: int):
         return self.puzzleParameters.pieceFromEdgeDict[edgeNum]
 
+    def addPiece(self, piece: PuzzlePiece):
+        """Adding a layer here to detect if we try to add the same piece twice"""
+        if piece in self.pieceList:
+            raise ValueError("Piece already in this fragment's pieceList!!")
+        self.pieceList.append(piece)
+
+    def addPieces(self, pieces: Iterable[PuzzlePiece]):
+        """Add a list of pieces"""
+        for piece in pieces:
+            self.addPiece(piece)
+
     def assignFragmentCoordinates(self):
         """Each piece within the fragment needs to be assigned local
         fragment coordinates.  Start from pieceList[0] and work out
@@ -586,12 +597,20 @@ class PuzzleFragment:
         fragment coordinates directly for puzzle maps indices.
         """
         startingPiece = self.pieceList[0]
-        self.setFragCoord(startingPiece, FragmentCoordinate(0, 0, 0))
+        # Determine it's initial starting fragment coordinate. If it already
+        # has one, use that, if not, start at 0,0,0
+        try:
+            startingFragCoord = self.getFragCoord(startingPiece)
+        except KeyError:
+            # no existing fragment coord for this piece (brand new fragment)
+            startingFragCoord = FragmentCoordinate(0, 0, 0)
+            self.setFragCoord(startingPiece, startingFragCoord)
         piecesToCheckNext = set([startingPiece])
         # N, E, S, W = ((-1, 0), (0, 1), (1, 0), (0, -1))
         # offsets = (N, E, S, W)
         minAssignedRow = 0
         minAssignedCol = 0
+        checkedPieceList = []
         while len(piecesToCheckNext) > 0:
             piecesToCheckNow = piecesToCheckNext
             piecesToCheckNext = set()
@@ -634,8 +653,11 @@ class PuzzleFragment:
                             # Track if there is a new minimum assigned column or row
                             minAssignedRow = min(partnerCoord.rowCoord, minAssignedRow)
                             minAssignedCol = min(partnerCoord.colCoord, minAssignedCol)
+                        if partnerPiece not in checkedPieceList:
                             # Add piece to the set of pieces to check the edges of next
                             piecesToCheckNext.add(partnerPiece)
+                # Once a piece had been checked for partners once, we don't want to visit it again
+                checkedPieceList.append(piece)
                 # Finished looping over current list of pieces to check
 
         # Finished looping, all pieces should have consistent fragment coordinates assigned
@@ -962,6 +984,11 @@ class PuzzleFragment:
         self, orderedEdgeList: List[Tuple[int, PuzzlePiece]]
     ) -> bool:
         """Check that the list makes a closed loop"""
+        tooLong = len(orderedEdgeList) > 4 * len(self.pieceList)
+        if tooLong:
+            raise RuntimeError(
+                "An impossible number of edges has been added to the external edge list!"
+            )
         longEnough = len(orderedEdgeList) > 1
         endsMatch = orderedEdgeList[0] == orderedEdgeList[-1]
         return longEnough and endsMatch
@@ -1758,9 +1785,10 @@ class PuzzleState:
                 frag = frag1
                 piece = self.getPieceFromEdge(edge2)
                 # otherFrags = [fragm.deepCopy() for fragm in fragments if fragm != frag1]
-            frag.pieceList.append(piece)
+            self.loosePieces.remove(piece)
+            frag.addPiece(piece)
             frag.fragEdgePairs.addConnection(edge1, edge2)
-            frag.assignFragmentCoordinates(force=True)
+            frag.assignFragmentCoordinates()
             frag.assignPuzzleMap()
             frag.updateCachedFreeEdgesList()
 
@@ -1791,7 +1819,7 @@ class PuzzleState:
             # If we pass that test, then these fragments already have compatible coordinates,
             # and we can just add all the info from frag2 to frag1, and then remove frag2 from the
             # fragment list
-            frag1.pieceList.extend(frag2.pieceList)
+            frag1.addPieces(frag2.pieceList)
             frag1.fragEdgePairs.extend(frag2.fragEdgePairs)
             frag1.fragEdgePairs.addConnection(edge1, edge2)  # don't forget the new pair
             for piece in frag2.pieceList:
@@ -1820,7 +1848,7 @@ class PuzzleState:
             rOffset = reqFPieceCoord.rowCoord - fPieceCoordAfterRotation.rowCoord
             cOffset = reqFPieceCoord.colCoord - fPieceCoordAfterRotation.colCoord
             # Add pieces from the floating fragment to the anchored fragment
-            aFrag.pieceList.extend(fFrag.pieceList)
+            aFrag.addPieces(fFrag.pieceList)
             # Transfer edge pairs also
             aFrag.fragEdgePairs.extend(fFrag.fragEdgePairs)
             # Add the new connection
@@ -1854,7 +1882,7 @@ class PuzzleState:
             rOffset = reqPiece2Coord.rowCoord - curCoord.rowCoord
             cOffset = reqPiece2Coord.colCoord - curCoord.colCoord
             # Apply changes to frag1
-            frag1.pieceList.extend(frag2.pieceList)
+            frag1.addPieces(frag2.pieceList)
             frag1.fragEdgePairs.extend(frag2.fragEdgePairs)
             frag1.fragEdgePairs.addConnection(edge1, edge2)
             for piece in frag2.pieceList:
