@@ -314,8 +314,8 @@ class PuzzlePiece:
                     # outer boarder edge(s) and on the piece type
                     cwDirIdx = (dirIdx + 1) % 4
                     ccwDirIdx = (dirIdx - 1) % 4
-                    cwFromBorder = edgeNums[cwDirIdx] == 0
-                    ccwFromBorder = edgeNums[ccwDirIdx] == 0
+                    ccwFromBorder = edgeNums[cwDirIdx] == 0
+                    cwFromBorder = edgeNums[ccwDirIdx] == 0
                     if cwFromBorder:
                         edgeClass = (
                             EdgeClass.CW_FROM_BORDER
@@ -890,15 +890,37 @@ class PuzzleFragment:
             raise ZeroEdgeNumberNotUniqueError(
                 "Tried to check the edge direction of a non-unique edge number (0)!"
             )
-        piece = self.parentPuzzleState.getPieceFromEdge(edgeNum)
+        piece = self.puzzleParameters.getPieceFromEdge(edgeNum)
         coord = self.getFragCoord(piece)
         edgeDirection = piece.getCWEdges(coord.rotationCount).index(edgeNum)
         return edgeDirection
 
+    def selectActiveEdge(self) -> int:
+        """Called from the active fragment, this method's job it to select
+        the next active edge to connect to. Initially, lets focus on the
+        outer border, and prefer to go around clockwise.
+        """
+        preferredEdgeClasses = (EdgeClass.CW_FROM_BORDER, EdgeClass.CW_FROM_CORNER)
+        freeEdges = self.getFreeEdgesList()
+        freeEdgeEdgeClasses = [self.getEdgeClass(edge) for edge in freeEdges]
+        for preferredEdgeClass in preferredEdgeClasses:
+            for freeEdge, freeEdgeClass in zip(freeEdges, freeEdgeEdgeClasses):
+                if freeEdgeClass == preferredEdgeClass:
+                    return freeEdge
+        # No free edge on this fragment is of any preferred EdgeClass
+        raise NotImplementedError(
+            "Border probably complete, time to implement next selection criteria"
+        )
+
+    def getEdgeClass(self, edge: int) -> EdgeClass:
+        return self.puzzleParameters.edgeClassFromEdge[edge]
+
     def getOrderedExternalEdgeList(
         self, verifyFlag: bool = True
     ) -> List[List[Tuple[int, PuzzlePiece]]]:
-        """Identify a starting free (unconnected) edge.  Then, follow the open
+        """
+        DOESN'T WORK RIGHT NOW, GOING TO TRY A DIFFERENT STRATEGY
+        Identify a starting free (unconnected) edge.  Then, follow the open
         edges clockwise around the entire fragment. If verifyFlag, then
         do the extra check to make sure all edges are either in the list of
         ordered external edges, or in the edgePairs.  (True for now,
@@ -1194,7 +1216,12 @@ class AnchoredPuzzleMap(PuzzleMap):
                 row = fragCoord.rowCoord
                 col = fragCoord.colCoord
                 rot = fragCoord.rotationCount
-                pieceMap[row, col] = piece
+                try:
+                    pieceMap[row, col] = piece
+                except IndexError:
+                    raise AnchoredPuzzleMapIndexError(
+                        "A piece location on an anchored fragment is outside the puzzle bounds!"
+                    )
                 rotationMap[row, col] = rot
                 # Store lookup in dict
                 coordFromPieceDict[piece] = fragCoord
@@ -1309,8 +1336,8 @@ class FloatingPuzzleMap(PuzzleMap):
         Finally, update the coordinate from piece dict.
         """
         ccwRotCount = -rotationCount  # numpy rotates ccw, while we want cw
-        self.pieceMap = self.pieceMap.rot90(ccwRotCount)
-        self.rotationMap = self.rotationMap.rot90(ccwRotCount)
+        self.pieceMap = np.rot90(self.pieceMap, k=ccwRotCount)
+        self.rotationMap = np.rot90(self.rotationMap, k=ccwRotCount)
         self.rotationMap = (self.rotationMap + rotationCount) % 4
         # Then update the other puzzlemap component
         _coordFromPiece = dict()
@@ -1475,7 +1502,7 @@ class PuzzleState:
                 # Neither edge is in the current EdgePairSet, this is a new required pairing!
                 newReqEdgePairs.append((e1, e2))
             elif self.edgePairs[e1] != e2:
-                # At least one of e1 and e1 is in the set, but not paired with the other
+                # At least one of e1 and e2 is in the set, but is not paired with the other
                 raise AddConnectionError(
                     "Geometrically required edge pairing does not match existing pairing in EdgePairSet!"
                 )
@@ -1771,7 +1798,10 @@ class PuzzleState:
         elif (frag1 is not None) and (frag2 is not None):
             # The two edges are each on different fragments, we need to join the two
             # fragments into a single new fragment
-            self.joinFragments(edge1, frag1, edge2, frag2)
+            try:
+                self.joinFragments(edge1, frag1, edge2, frag2)
+            except AnchoredPuzzleMapIndexError:
+                raise AddConnectionError("Anchored piece located outside puzzle grid!")
         else:
             # One is on a fragment and the other is on a loose piece,
             # join the loose piece to the fragment
@@ -1789,7 +1819,10 @@ class PuzzleState:
             frag.addPiece(piece)
             frag.fragEdgePairs.addConnection(edge1, edge2)
             frag.assignFragmentCoordinates()
-            frag.assignPuzzleMap()
+            try:
+                frag.assignPuzzleMap()
+            except AnchoredPuzzleMapIndexError:
+                raise AddConnectionError("Anchored piece located outside puzzle grid!")
             frag.updateCachedFreeEdgesList()
 
         # The puzzle state edgePairs is now out of sync
@@ -1946,16 +1979,7 @@ class PuzzleState:
                 break
         if activeFragment is None:
             raise Exception("No anchored fragment!")
-        edgeLoops = activeFragment.getOrderedExternalEdgeList()
-        # Find the first nonzero edge
-        activeEdge = None
-        for edgeList in edgeLoops:
-            for edge, piece in edgeList:
-                if edge != 0:
-                    activeEdge = edge
-                    return activeEdge
-        # No nonzero edges found, raise an exception
-        raise Exception("No nonzero edges found on the active fragment")
+        return fragment.selectActiveEdge()
 
     def findCandidateEdges(self, activeEdge: int) -> Tuple[int]:
         """Given the current puzzle state, and the active
@@ -2046,7 +2070,7 @@ class PuzzleState:
 
         coord = fragment.getFragCoord(piece)
         origEdgeDir = piece.getEdgeNums().index(edgeNum)
-        activeEdgeDir = coord.rotationCount + origEdgeDir
+        activeEdgeDir = (coord.rotationCount + origEdgeDir) % 4
         # N,E,S,W
         rowOffset = (-1, 0, 1, 0)[activeEdgeDir]
         colOffset = (0, 1, -1, 0)[activeEdgeDir]
@@ -2449,6 +2473,10 @@ class ZeroEdgeNumberNotUniqueError(Exception):
     pass
 
 
+class AnchoredPuzzleMapIndexError(Exception):
+    pass
+
+
 def main():
     nRows = 5
     nCols = 5
@@ -2463,6 +2491,9 @@ def main():
         solvedPuzzle = solve(initialPuzzState)
     except OutOfEdgesError as e:
         print("Impossible, no solution found!")
+        print(f"{len(listOfErrors)} errors found!")
+        for e in listOfErrors:
+            print(e)
         return
     print("Found final solution!!  Figure out a way to print it!")
     solvedPuzzle.show()
